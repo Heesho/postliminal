@@ -2,12 +2,12 @@ import type { NodeData, NodeType } from "@/types/project";
 import { DEFAULT_IMAGE_MODEL_ID, getImageModelOption } from "./imageModels";
 
 const outputGradients = [
-  "from-zinc-950 via-neutral-700 to-amber-300",
-  "from-black via-stone-800 to-cyan-300",
-  "from-neutral-950 via-zinc-700 to-violet-300",
-  "from-stone-950 via-neutral-600 to-yellow-200",
-  "from-black via-slate-700 to-teal-200",
-  "from-zinc-950 via-stone-600 to-fuchsia-200",
+  "from-[#06070a] via-[#35413f] to-[#d8b45c]",
+  "from-[#06070a] via-[#243336] to-[#77d5ce]",
+  "from-[#0a0c10] via-[#4d4637] to-[#eee7d6]",
+  "from-[#101216] via-[#324447] to-[#aeb9b3]",
+  "from-[#06070a] via-[#3c3a32] to-[#e7ca82]",
+  "from-[#101216] via-[#263234] to-[#c7d0ca]",
 ];
 
 export function defaultNodeData(type: NodeType, index = 0): NodeData {
@@ -29,6 +29,7 @@ export function defaultNodeData(type: NodeType, index = 0): NodeData {
         title: "Image Model",
         model: DEFAULT_IMAGE_MODEL_ID,
         modelLabel: getImageModelOption(DEFAULT_IMAGE_MODEL_ID).nodeLabel,
+        quality: "medium",
         status: "idle",
       };
     case "image_output":
@@ -59,8 +60,4 @@ export function defaultNodeData(type: NodeType, index = 0): NodeData {
         status: "idle",
       };
   }
-}
-
-export function mockOutputGradient(index: number) {
-  return outputGradients[index % outputGradients.length];
 }

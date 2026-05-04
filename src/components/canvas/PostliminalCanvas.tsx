@@ -34,15 +34,14 @@ import {
 import {
   ArrowRight,
   Asterisk,
+  Check,
   ChevronDown,
   ChevronRight,
   Circle,
   Cpu,
-  Hand,
   Image as ImageIcon,
   Info,
   Minus,
-  MousePointer2,
   Plus,
   Redo2,
   Settings,
@@ -58,6 +57,11 @@ import {
   resolveImageGenerationInputs,
 } from "@/lib/imageGenerationClient";
 import {
+  CANVAS_GRID_GAP,
+  CANVAS_SNAP_GRID,
+  snapCanvasPosition,
+} from "@/lib/canvasGrid";
+import {
   DEFAULT_IMAGE_MODEL_ID,
   getImageModelOption,
 } from "@/lib/imageModels";
@@ -68,6 +72,12 @@ import {
   SETTINGS_STORAGE_KEY,
   writeLocalSettings,
 } from "@/lib/localSettings";
+import {
+  DEFAULT_OPENAI_IMAGE_API_MODEL,
+  estimateOpenAiImageOutputCostUsd,
+  formatUsdCents,
+  normalizeOpenAiImageResolution,
+} from "@/lib/openAiImagePricing";
 import type {
   EdgeType,
   NodeData,
@@ -92,7 +102,7 @@ const nodeTypes = {
   selection_group: GroupNode,
 };
 
-function WeavyEdge(props: EdgeProps) {
+function LiminalEdge(props: EdgeProps) {
   const [edgePath] = getBezierPath({
     sourceX: props.sourceX,
     sourceY: props.sourceY,
@@ -103,7 +113,7 @@ function WeavyEdge(props: EdgeProps) {
     curvature: 0.34,
   });
   const data = props.data as { color?: string } | undefined;
-  const color = data?.color ?? "#52d6b1";
+  const color = data?.color ?? "#6aa6ff";
 
   return (
     <BaseEdge
@@ -113,28 +123,18 @@ function WeavyEdge(props: EdgeProps) {
       style={{
         ...props.style,
         stroke: color,
-        strokeWidth: props.selected ? 2.1 : 1.45,
+        strokeWidth: props.selected ? 2 : 1.35,
         strokeLinecap: "round",
         strokeLinejoin: "round",
-        filter: `drop-shadow(0 0 5px ${color}36)`,
+        filter: `drop-shadow(0 0 7px ${color}24)`,
       }}
     />
   );
 }
 
 const edgeTypes = {
-  weavy: WeavyEdge,
+  liminal: LiminalEdge,
 };
-
-const GRID_GAP = 20;
-const snapGrid: [number, number] = [GRID_GAP, GRID_GAP];
-
-function snapPosition(position: { x: number; y: number }) {
-  return {
-    x: Math.round(position.x / GRID_GAP) * GRID_GAP,
-    y: Math.round(position.y / GRID_GAP) * GRID_GAP,
-  };
-}
 
 const menuItems: Array<{
   type: NodeType;
@@ -149,7 +149,7 @@ const menuItems: Array<{
   },
   {
     type: "image_reference",
-    label: "Import",
+    label: "Import image",
     icon: <ImageIcon className="h-4 w-4" />,
   },
 ];
@@ -180,11 +180,11 @@ function typeLabel(type: NodeType) {
 function edgeColor(type: EdgeType) {
   const promptEdges: EdgeType[] = ["derived_from", "input_to"];
 
-  return promptEdges.includes(type) ? "#df72f4" : "#52d6b1";
+  return promptEdges.includes(type) ? "#f5b950" : "#6aa6ff";
 }
 
 function edgeTone(type: EdgeType) {
-  return edgeColor(type) === "#df72f4" ? "prompt" : "image";
+  return edgeColor(type) === "#f5b950" ? "prompt" : "image";
 }
 
 function edgeSourceHandle(type: EdgeType) {
@@ -200,34 +200,80 @@ function handleTone(handleId?: string | null) {
 }
 
 function handleColor(handleId?: string | null) {
-  return handleTone(handleId) === "prompt" ? "#df72f4" : "#52d6b1";
+  return handleTone(handleId) === "prompt" ? "#f5b950" : "#6aa6ff";
 }
 
 function AppSidebar({
   onOpenProjects,
   onOpenSettings,
+  zoom,
+  canUndo,
+  canRedo,
+  onUndo,
+  onRedo,
 }: {
   onOpenProjects: () => void;
   onOpenSettings: () => void;
+  zoom: number;
+  canUndo: boolean;
+  canRedo: boolean;
+  onUndo: () => void;
+  onRedo: () => void;
 }) {
+  const railButtonClass =
+    "grid h-9 w-9 place-items-center rounded-[12px] text-white/[0.52] transition hover:bg-white/[0.08] hover:text-white/[0.92] disabled:pointer-events-none disabled:text-white/[0.18]";
+
   return (
-    <div className="absolute inset-y-0 left-0 z-40 flex w-12 flex-col items-center justify-between border-r border-white/10 bg-[#202024]/95 py-3 shadow-2xl">
-      <button
-        aria-label="Open projects"
-        title="Open projects"
-        className="grid h-8 w-8 place-items-center rounded-md bg-zinc-100 text-sm font-semibold text-zinc-950 transition hover:bg-white"
-        onClick={onOpenProjects}
-      >
-        P
-      </button>
-      <button
-        aria-label="Settings"
-        title="Settings"
-        className="grid h-9 w-9 place-items-center rounded-md text-zinc-400 transition hover:bg-white/[0.06] hover:text-zinc-100"
-        onClick={onOpenSettings}
-      >
-        <Settings className="h-4 w-4" />
-      </button>
+    <div className="absolute inset-y-0 left-0 z-40 flex w-12 flex-col items-center border-r border-white/[0.08] bg-white/[0.055] py-3 shadow-[0_24px_70px_rgba(0,0,0,0.42)] backdrop-blur-2xl">
+      <div className="flex flex-col items-center gap-3">
+        <button
+          aria-label="Open projects"
+          title="Open projects"
+          className="grid h-8 w-8 place-items-center transition hover:brightness-125"
+          onClick={onOpenProjects}
+        >
+          <span className="postliminal-mark scale-[0.82]" aria-hidden="true" />
+        </button>
+
+        <div className="h-px w-7 bg-white/[0.10]" />
+
+        <div className="flex flex-col items-center gap-1">
+          <div
+            aria-label={`Zoom ${Math.round(zoom * 100)}%`}
+            title="Zoom"
+            className="mb-1 grid h-8 w-9 place-items-center font-mono text-[11px] font-semibold leading-none tabular-nums text-white/[0.62]"
+          >
+            {Math.round(zoom * 100)}%
+          </div>
+          <button
+            aria-label="Undo"
+            title="Undo"
+            className={railButtonClass}
+            disabled={!canUndo}
+            onClick={onUndo}
+          >
+            <Undo2 className="h-4 w-4" />
+          </button>
+          <button
+            aria-label="Redo"
+            title="Redo"
+            className={railButtonClass}
+            disabled={!canRedo}
+            onClick={onRedo}
+          >
+            <Redo2 className="h-4 w-4" />
+          </button>
+          <div className="my-1 h-px w-7 bg-white/[0.10]" />
+          <button
+            aria-label="Settings"
+            title="Settings"
+            className={railButtonClass}
+            onClick={onOpenSettings}
+          >
+            <Settings className="h-4 w-4" />
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -247,20 +293,20 @@ function SettingsPanel({
   const imageModel = getImageModelOption(DEFAULT_IMAGE_MODEL_ID);
 
   return (
-    <aside className="absolute inset-y-0 right-0 z-50 w-[360px] border-l border-white/10 bg-[#242428]/98 shadow-2xl backdrop-blur-xl">
+    <aside className="absolute inset-y-0 right-0 z-50 w-[360px] border-l border-white/[0.10] bg-white/[0.075] shadow-[0_24px_80px_rgba(0,0,0,0.48)] backdrop-blur-2xl">
       <div className="flex h-full flex-col">
-        <div className="flex items-start justify-between border-b border-white/10 p-4">
+        <div className="flex items-start justify-between border-b border-white/[0.08] p-4">
           <div>
-            <div className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">
+            <div className="font-mono text-[10px] uppercase tracking-[0.2em] text-white/[0.34]">
               Settings
             </div>
-            <div className="mt-1 text-sm font-medium text-zinc-100">
+            <div className="mt-1 text-sm font-medium text-white/[0.92]">
               Image model
             </div>
           </div>
           <button
             aria-label="Close settings"
-            className="grid h-8 w-8 place-items-center rounded-md text-zinc-500 transition hover:bg-white/[0.07] hover:text-zinc-100"
+            className="grid h-8 w-8 place-items-center rounded-[10px] text-white/[0.46] transition hover:bg-white/[0.08] hover:text-white/[0.92]"
             onClick={onClose}
           >
             <X className="h-4 w-4" />
@@ -268,17 +314,17 @@ function SettingsPanel({
         </div>
 
         <div className="space-y-5 p-4">
-          <div className="rounded-md border border-white/10 bg-[#19191d] p-3">
-            <div className="text-xs text-zinc-500">Fixed image model</div>
-            <div className="mt-1 text-sm font-medium text-zinc-100">
+          <div className="rounded-[14px] border border-white/[0.09] bg-white/[0.04] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+            <div className="text-xs text-white/[0.52]">Fixed image model</div>
+            <div className="mt-1 text-sm font-medium text-white/[0.92]">
               {imageModel.label}
             </div>
           </div>
 
           <label className="block">
-            <span className="text-xs text-zinc-400">OpenAI API key</span>
+            <span className="text-xs text-white/[0.62]">OpenAI API key</span>
             <input
-              className="mt-2 h-10 w-full rounded-md border border-white/10 bg-[#19191d] px-3 text-sm text-zinc-100 outline-none focus:border-white/25"
+              className="mt-2 h-10 w-full rounded-[14px] border border-white/[0.09] bg-white/[0.04] px-3 text-sm text-white/[0.92] outline-none transition focus:border-[#f5b950]/45 focus:bg-white/[0.065]"
               type="password"
               placeholder="sk-..."
               value={settings.openaiApiKey}
@@ -288,7 +334,7 @@ function SettingsPanel({
             />
           </label>
 
-          <div className="rounded-md border border-white/10 bg-[#19191d] p-3 text-xs leading-5 text-zinc-400">
+          <div className="rounded-[14px] border border-white/[0.09] bg-white/[0.04] p-3 text-xs leading-5 text-white/[0.54]">
             The API key stays in this browser for the local prototype. You can
             also set OPENAI_API_KEY in the local environment before starting the
             app.
@@ -302,10 +348,10 @@ function SettingsPanel({
 function ProjectHeader({ title }: { title: string }) {
   return (
     <div
-      className="absolute left-16 top-4 z-30 flex h-9 items-center rounded-md border border-white/10 bg-[#202024]/92 px-3 shadow-xl backdrop-blur-xl"
+      className="absolute left-16 top-4 z-30 flex h-10 items-center overflow-hidden rounded-[14px] border border-white/[0.12] bg-[#1b1c21]/[0.88] px-3 shadow-[0_18px_48px_rgba(0,0,0,0.42),inset_0_1px_0_rgba(255,255,255,0.10)] backdrop-blur-2xl"
       aria-label="Current project"
     >
-      <div className="text-sm font-medium text-zinc-100">{title}</div>
+      <div className="text-sm font-medium text-white/[0.92]">{title}</div>
     </div>
   );
 }
@@ -323,20 +369,20 @@ function ContextMenu({
 }) {
   return (
     <div
-      className="absolute z-40 w-52 overflow-hidden rounded-lg border border-white/10 bg-[#232327]/95 p-1 shadow-2xl backdrop-blur-xl"
+      className="absolute z-40 w-52 overflow-hidden rounded-[16px] border border-white/[0.10] bg-white/[0.075] p-1 shadow-2xl backdrop-blur-2xl"
       style={{ left: x, top: y }}
       onMouseLeave={onClose}
     >
-      <div className="px-3 py-2 text-[10px] uppercase tracking-[0.18em] text-zinc-500">
-        Create box
+      <div className="px-3 py-2 font-mono text-[10px] uppercase tracking-[0.18em] text-white/[0.34]">
+        Add
       </div>
       {menuItems.map((item) => (
         <button
           key={item.type}
-          className="flex h-10 w-full items-center gap-3 rounded-md px-3 text-sm text-zinc-200 transition hover:bg-white/[0.07]"
+          className="flex h-10 w-full items-center gap-3 rounded-[12px] px-3 text-sm text-white/[0.88] transition hover:bg-white/[0.08]"
           onClick={() => onCreate(item.type)}
         >
-          <span className="text-zinc-400">{item.icon}</span>
+          <span className="text-white/[0.50]">{item.icon}</span>
           {item.label}
         </button>
       ))}
@@ -443,7 +489,7 @@ function looseConnectionPosition(
   const x =
     start.handleType === "target" ? point.x - nodeWidth(createdType) : point.x;
 
-  return snapPosition({
+  return snapCanvasPosition({
     x,
     y: point.y - top,
   });
@@ -471,80 +517,23 @@ function looseConnectionNodeData(type: NodeType): NodeData {
   return {};
 }
 
-function BottomToolbar({
-  zoom,
-  canUndo,
-  canRedo,
-  onUndo,
-  onRedo,
-}: {
-  zoom: number;
-  canUndo: boolean;
-  canRedo: boolean;
-  onUndo: () => void;
-  onRedo: () => void;
-}) {
-  const historyButtonClass =
-    "grid h-8 w-8 place-items-center rounded-md text-zinc-400 transition hover:bg-white/[0.06] hover:text-zinc-100 disabled:pointer-events-none disabled:text-zinc-600";
-
-  return (
-    <div className="absolute bottom-4 left-1/2 z-30 flex h-10 -translate-x-1/2 items-center gap-1 rounded-lg border border-white/10 bg-[#242428]/95 p-1 shadow-2xl backdrop-blur-xl">
-      <button
-        aria-label="Select"
-        title="Select"
-        className="grid h-8 w-8 place-items-center rounded-md bg-lime-200 text-zinc-950"
-      >
-        <MousePointer2 className="h-4 w-4" />
-      </button>
-      <button
-        aria-label="Pan"
-        title="Pan"
-        className="grid h-8 w-8 place-items-center rounded-md text-zinc-400 transition hover:bg-white/[0.06] hover:text-zinc-100"
-      >
-        <Hand className="h-4 w-4" />
-      </button>
-      <div className="mx-1 h-5 w-px bg-white/10" />
-      <button
-        aria-label="Undo"
-        title="Undo"
-        className={historyButtonClass}
-        disabled={!canUndo}
-        onClick={onUndo}
-      >
-        <Undo2 className="h-4 w-4" />
-      </button>
-      <button
-        aria-label="Redo"
-        title="Redo"
-        className={historyButtonClass}
-        disabled={!canRedo}
-        onClick={onRedo}
-      >
-        <Redo2 className="h-4 w-4" />
-      </button>
-      <div className="px-2 text-xs text-zinc-400">{Math.round(zoom * 100)}%</div>
-    </div>
-  );
-}
-
 function TopRightTaskWidget() {
   return (
-    <div className="absolute right-4 top-4 z-30 w-36 rounded-md border border-white/10 bg-[#242428] px-3 py-3 shadow-2xl">
-      <div className="flex items-center gap-1.5 whitespace-nowrap text-xs font-medium leading-none text-zinc-200">
-        <Asterisk className="h-3.5 w-3.5" />
-        <span>616 credits</span>
+    <div className="absolute right-4 top-4 z-30 w-36 rounded-[16px] border border-white/[0.10] bg-white/[0.065] px-3 py-3 shadow-2xl backdrop-blur-2xl">
+      <div className="flex items-center gap-1.5 whitespace-nowrap text-xs font-medium leading-none text-white/[0.9]">
+        <Asterisk className="h-3.5 w-3.5 text-[#f5b950]" />
+        <span>No tasks</span>
       </div>
-      <button className="mt-3 flex items-center gap-1.5 text-xs leading-none text-zinc-200 transition hover:text-zinc-50">
+      <button className="mt-3 flex items-center gap-1.5 text-xs leading-none text-white/[0.56] transition hover:text-white/[0.9]">
         Tasks
-        <ChevronDown className="h-3 w-3 text-zinc-500" />
+        <ChevronDown className="h-3 w-3 text-white/[0.38]" />
       </button>
     </div>
   );
 }
 
-const imageModelRunCost = 9;
 const imageModelQualities = ["low", "medium", "high"] as const;
-const imageModelResolutions = ["1024x1024", "1536x1024", "2048x1152"] as const;
+const imageModelResolutions = ["1024x1024", "1536x1024", "1024x1536"] as const;
 
 function stringDataValue(value: unknown, fallback: string) {
   return typeof value === "string" && value.length > 0 ? value : fallback;
@@ -570,45 +559,98 @@ function SidebarDropdown({
   onChange: (value: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (
+        event.target instanceof window.Node &&
+        !rootRef.current?.contains(event.target)
+      ) {
+        setOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    };
+
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    document.addEventListener("keydown", closeOnEscape);
+
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
 
   return (
-    <div className="relative" onMouseLeave={() => setOpen(false)}>
-      <div className="flex items-center gap-1 text-xs text-zinc-400">
+    <div
+      ref={rootRef}
+      className="relative block"
+      onPointerDown={(event) => event.stopPropagation()}
+    >
+      <div className="flex items-center gap-1 text-xs text-white/[0.56]">
         {label} <Info className="h-3 w-3" />
       </div>
-      <button
-        type="button"
-        className="mt-2 flex h-8 w-full items-center justify-between rounded border border-white/10 bg-[#1c1c21] px-2 text-left text-xs font-medium text-zinc-100 outline-none transition hover:border-white/20 focus:border-white/25"
-        onClick={() => setOpen((current) => !current)}
-      >
-        <span>{value}</span>
-        <ChevronDown
-          className={`h-3.5 w-3.5 text-zinc-500 transition ${
-            open ? "rotate-180" : ""
+
+      <div className="relative mt-2">
+        <button
+          type="button"
+          className={`flex h-9 w-full items-center justify-between rounded-[14px] border px-3 text-left text-xs font-medium text-white/[0.9] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] outline-none transition ${
+            open
+              ? "border-[#f5b950]/45 bg-white/[0.075]"
+              : "border-white/[0.09] bg-white/[0.045] hover:border-white/[0.18] hover:bg-white/[0.065]"
           }`}
-        />
-      </button>
-      {open ? (
-        <div className="absolute left-0 right-0 top-full z-50 mt-1 overflow-hidden rounded border border-white/10 bg-[#19191d] py-1 shadow-2xl">
-          {options.map((option) => (
-            <button
-              key={option}
-              type="button"
-              className={`flex h-8 w-full items-center px-2 text-left text-xs transition ${
-                option === value
-                  ? "bg-white/[0.07] text-zinc-50"
-                  : "text-zinc-300 hover:bg-white/[0.05] hover:text-zinc-50"
-              }`}
-              onClick={() => {
-                onChange(option);
-                setOpen(false);
-              }}
-            >
-              {option}
-            </button>
-          ))}
-        </div>
-      ) : null}
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          onClick={() => setOpen((current) => !current)}
+        >
+          <span>{value}</span>
+          <ChevronDown
+            className={`h-3.5 w-3.5 text-white/[0.38] transition ${
+              open ? "rotate-180 text-white/[0.62]" : ""
+            }`}
+          />
+        </button>
+
+        {open ? (
+          <div
+            className="absolute left-0 right-0 top-full z-50 mt-2 overflow-hidden rounded-[14px] border border-white/[0.12] bg-[#202024]/95 p-1 shadow-[0_18px_48px_rgba(0,0,0,0.42),inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-2xl"
+            role="listbox"
+          >
+            {options.map((option) => {
+              const selected = option === value;
+
+              return (
+                <button
+                  key={option}
+                  type="button"
+                  className={`flex h-8 w-full items-center gap-2 rounded-[10px] px-2.5 text-left text-xs font-medium transition ${
+                    selected
+                      ? "bg-[#f5b950]/18 text-white"
+                      : "text-white/[0.72] hover:bg-white/[0.08] hover:text-white/[0.92]"
+                  }`}
+                  role="option"
+                  aria-selected={selected}
+                  onClick={() => {
+                    onChange(option);
+                    setOpen(false);
+                  }}
+                >
+                  <span className="grid h-3.5 w-3.5 place-items-center">
+                    {selected ? <Check className="h-3.5 w-3.5" /> : null}
+                  </span>
+                  <span>{option}</span>
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -616,7 +658,6 @@ function SidebarDropdown({
 function useImageModelRunner() {
   const project = useProjectStore((state) => state.project);
   const updateNode = useProjectStore((state) => state.updateNode);
-  const createMockOutputs = useProjectStore((state) => state.createMockOutputs);
   const createImageOutputs = useProjectStore((state) => state.createImageOutputs);
 
   return useCallback(
@@ -624,9 +665,12 @@ function useImageModelRunner() {
       if (node.data.status === "running") return;
 
       const option = getImageModelOption(DEFAULT_IMAGE_MODEL_ID);
-      const modelVariant = stringDataValue(node.data.modelVariant, "GPT Image 2");
+      const modelVariant = stringDataValue(
+        node.data.modelVariant,
+        "GPT Image 2",
+      );
       const quality = stringDataValue(node.data.quality, "medium");
-      const resolution = stringDataValue(node.data.resolution, "2048x1152");
+      const resolution = normalizeOpenAiImageResolution(node.data.resolution);
       const runs = boundedRuns(node.data.runs);
       const inputs = resolveImageGenerationInputs(project, node.id);
 
@@ -650,13 +694,15 @@ function useImageModelRunner() {
       try {
         const result = await generateChatGptImages({
           ...inputs,
+          projectId: project.projectId,
+          generationNodeId: node.id,
           quality,
           resolution,
           runs,
         });
 
         createImageOutputs(node.id, result.images, "human", {
-          sourceModel: "ChatGPT Images 2.0",
+          sourceModel: option.label,
           apiModel: result.model,
           apiSize: result.size,
           quality,
@@ -665,11 +711,11 @@ function useImageModelRunner() {
         });
         updateNode(node.id, { data: { lastRunError: "" } }, "human");
       } catch (error) {
-        createMockOutputs(node.id, "human");
         updateNode(
           node.id,
           {
             data: {
+              status: "error",
               lastRunError:
                 error instanceof Error
                   ? error.message
@@ -680,7 +726,7 @@ function useImageModelRunner() {
         );
       }
     },
-    [createImageOutputs, createMockOutputs, project, updateNode],
+    [createImageOutputs, project, updateNode],
   );
 }
 
@@ -695,8 +741,14 @@ function ImageModelTaskRow({
 }) {
   const updateNode = useProjectStore((state) => state.updateNode);
   const quality = stringDataValue(node.data.quality, "medium");
-  const resolution = stringDataValue(node.data.resolution, "2048x1152");
+  const resolution = normalizeOpenAiImageResolution(node.data.resolution);
   const runs = boundedRuns(node.data.runs);
+  const estimatedCost = estimateOpenAiImageOutputCostUsd({
+    model: DEFAULT_OPENAI_IMAGE_API_MODEL,
+    quality,
+    resolution,
+    runs,
+  });
   const isRunning = node.data.status === "running";
 
   const updateData = (data: NodeData) => {
@@ -708,21 +760,20 @@ function ImageModelTaskRow({
   return (
     <div>
       <button
-        className="flex h-12 w-full items-center gap-2 px-4 text-left text-xs text-zinc-100 transition hover:bg-white/[0.035]"
+        className="flex h-12 w-full items-center gap-2 px-4 text-left text-xs text-white/[0.9] transition hover:bg-white/[0.055]"
         onClick={onToggle}
       >
-        <Cpu className="h-3.5 w-3.5 shrink-0 text-zinc-300" />
+        <Cpu className="h-3.5 w-3.5 shrink-0 text-[#6aa6ff]" />
         <span className="min-w-0 flex-1 truncate">
-          {isRunning ? "Image Model Running" : "Image Model"}
+          {isRunning ? "Image model running" : "Image model"}
         </span>
-        <span className="flex items-center gap-1 text-zinc-200">
-          <Sparkles className="h-3.5 w-3.5" />
-          {runs * imageModelRunCost}
+        <span className="font-mono text-[11px] text-white/[0.72]">
+          ~{formatUsdCents(estimatedCost)}
         </span>
         {expanded ? (
-          <ChevronDown className="h-3.5 w-3.5 text-zinc-500" />
+          <ChevronDown className="h-3.5 w-3.5 text-white/[0.38]" />
         ) : (
-          <ChevronRight className="h-3.5 w-3.5 text-zinc-500" />
+          <ChevronRight className="h-3.5 w-3.5 text-white/[0.38]" />
         )}
       </button>
 
@@ -745,8 +796,8 @@ function ImageModelTaskRow({
           />
 
           {errorMessage ? (
-            <div className="rounded border border-amber-300/15 bg-amber-300/5 px-2.5 py-2 text-[11px] leading-4 text-amber-100/80">
-              Using mock fallback: {errorMessage}
+            <div className="rounded-[12px] border border-[#f5b950]/[18%] bg-[#f5b950]/[7%] px-2.5 py-2 text-[11px] leading-4 text-white/[0.82]">
+              Image generation failed: {errorMessage}
             </div>
           ) : null}
         </div>
@@ -763,13 +814,20 @@ function ImageModelInspector({ nodes }: { nodes: PostliminalNode[] }) {
   const canRun = nodes.some((node) => node.data.status !== "running");
   const footerRuns = boundedRuns(nodes[0]?.data.runs);
   const totalCost = nodes.reduce(
-    (sum, node) => sum + boundedRuns(node.data.runs) * imageModelRunCost,
+    (sum, node) =>
+      sum +
+      estimateOpenAiImageOutputCostUsd({
+        model: DEFAULT_OPENAI_IMAGE_API_MODEL,
+        quality: node.data.quality,
+        resolution: node.data.resolution,
+        runs: boundedRuns(node.data.runs),
+      }),
     0,
   );
 
   useEffect(() => {
     if (nodes.length === 0) return;
-    if (!nodes.some((node) => node.id === expandedNodeId)) {
+    if (expandedNodeId && !nodes.some((node) => node.id === expandedNodeId)) {
       setExpandedNodeId(nodes[0].id);
     }
   }, [expandedNodeId, nodes]);
@@ -788,16 +846,19 @@ function ImageModelInspector({ nodes }: { nodes: PostliminalNode[] }) {
   };
 
   return (
-    <aside className="absolute inset-y-0 right-0 z-50 w-[252px] border-l border-white/10 bg-[#242428] shadow-2xl">
+    <aside
+      className="absolute inset-y-0 right-0 z-50 w-[252px] border-l border-white/[0.10] bg-white/[0.075] shadow-[0_24px_80px_rgba(0,0,0,0.48)] backdrop-blur-2xl"
+      onPointerDown={(event) => event.stopPropagation()}
+    >
       <div className="flex h-full flex-col">
-        <div className="border-b border-white/10 px-4 py-4">
-          <div className="flex items-center gap-1.5 whitespace-nowrap text-xs font-medium leading-none text-zinc-200">
-            <Asterisk className="h-3.5 w-3.5" />
-            <span>616 credits</span>
+        <div className="border-b border-white/[0.08] px-4 py-4">
+          <div className="flex items-center gap-1.5 whitespace-nowrap text-xs font-medium leading-none text-white/[0.9]">
+            <Asterisk className="h-3.5 w-3.5 text-[#f5b950]" />
+            <span>Tasks</span>
           </div>
-          <button className="mt-3 flex items-center gap-1.5 text-xs leading-none text-zinc-200 transition hover:text-zinc-50">
-            Tasks {runningCount > 0 ? `${runningCount} Running` : ""}
-            <ChevronDown className="h-3 w-3 text-zinc-500" />
+          <button className="mt-3 flex items-center gap-1.5 text-xs leading-none text-white/[0.56] transition hover:text-white/[0.9]">
+            {runningCount > 0 ? `${runningCount} running` : "No running tasks"}
+            <ChevronDown className="h-3 w-3 text-white/[0.38]" />
           </button>
         </div>
 
@@ -816,25 +877,25 @@ function ImageModelInspector({ nodes }: { nodes: PostliminalNode[] }) {
           ))}
         </div>
 
-        <div className="border-t border-white/15 px-4 py-4">
-          <div className="text-[10px] uppercase tracking-[0.14em] text-zinc-500">
+        <div className="border-t border-white/[0.10] px-4 py-4">
+          <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-white/[0.34]">
             Run selected nodes
           </div>
           <div className="mt-4 flex items-center justify-between">
-            <div className="text-xs font-medium text-zinc-100">Runs</div>
-            <div className="flex h-7 items-center overflow-hidden rounded border border-white/15 bg-[#1c1c21]">
+            <div className="text-xs font-medium text-white/[0.9]">Runs</div>
+            <div className="flex h-8 items-center overflow-hidden rounded-[12px] border border-white/[0.10] bg-white/[0.045]">
               <button
-                className="grid h-7 w-8 place-items-center text-zinc-400 transition hover:bg-white/[0.06] hover:text-zinc-100 disabled:text-zinc-700"
+                className="grid h-8 w-8 place-items-center text-white/[0.52] transition hover:bg-white/[0.08] hover:text-white/[0.9] disabled:text-white/[0.18]"
                 disabled={footerRuns <= 1}
                 onClick={() => updateAllRuns(footerRuns - 1)}
               >
                 <Minus className="h-3 w-3" />
               </button>
-              <div className="w-9 text-center text-xs font-semibold text-zinc-100">
+              <div className="w-9 text-center font-mono text-xs font-semibold text-white/[0.9]">
                 {footerRuns}
               </div>
               <button
-                className="grid h-7 w-8 place-items-center text-zinc-400 transition hover:bg-white/[0.06] hover:text-zinc-100"
+                className="grid h-8 w-8 place-items-center text-white/[0.52] transition hover:bg-white/[0.08] hover:text-white/[0.9]"
                 onClick={() => updateAllRuns(footerRuns + 1)}
               >
                 <Plus className="h-3 w-3" />
@@ -842,14 +903,13 @@ function ImageModelInspector({ nodes }: { nodes: PostliminalNode[] }) {
             </div>
           </div>
           <div className="mt-4 flex items-center justify-between text-xs">
-            <div className="text-zinc-500">Total cost</div>
-            <div className="flex items-center gap-1 text-zinc-100">
-              <Sparkles className="h-3.5 w-3.5" />
-              {totalCost} credits
+            <div className="text-white/[0.48]">Est. output cost</div>
+            <div className="font-mono text-xs font-semibold text-white/[0.9]">
+              ~{formatUsdCents(totalCost)}
             </div>
           </div>
           <button
-            className="mt-4 flex h-8 w-full items-center justify-center gap-2 rounded bg-[#e8e6c8] text-xs font-medium text-zinc-950 transition hover:bg-[#f2f0d4] disabled:cursor-default disabled:opacity-55"
+            className="mt-4 flex h-9 w-full items-center justify-center gap-2 rounded-[12px] border border-white/[0.14] bg-white/[0.10] text-xs font-medium text-white/[0.92] shadow-[inset_0_1px_0_rgba(255,255,255,0.12)] transition hover:bg-white/[0.14] disabled:cursor-default disabled:opacity-55"
             disabled={!canRun}
             onClick={runSelected}
           >
@@ -903,20 +963,20 @@ function NodeInspector({
   const status = String(node.data.status ?? "idle") as NodeStatus;
 
   return (
-    <aside className="absolute inset-y-0 right-0 z-50 w-[324px] border-l border-white/10 bg-[#242428] shadow-2xl">
+    <aside className="absolute inset-y-0 right-0 z-50 w-[324px] border-l border-white/[0.10] bg-white/[0.075] shadow-[0_24px_80px_rgba(0,0,0,0.48)] backdrop-blur-2xl">
       <div className="flex h-full flex-col">
-        <div className="flex items-start justify-between border-b border-white/10 p-4">
+        <div className="flex items-start justify-between border-b border-white/[0.08] p-4">
           <div>
-            <div className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">
+            <div className="font-mono text-[10px] uppercase tracking-[0.2em] text-white/[0.34]">
               {typeLabel(node.type)}
             </div>
-            <div className="mt-1 text-sm font-medium text-zinc-100">
+            <div className="mt-1 text-sm font-medium text-white/[0.92]">
               {node.data.title ? String(node.data.title) : "Untitled"}
             </div>
           </div>
           <button
             aria-label="Close inspector"
-            className="grid h-8 w-8 place-items-center rounded-md text-zinc-500 transition hover:bg-white/[0.07] hover:text-zinc-100"
+            className="grid h-8 w-8 place-items-center rounded-[10px] text-white/[0.46] transition hover:bg-white/[0.08] hover:text-white/[0.92]"
             onClick={() => clearSelection("human")}
           >
             <X className="h-4 w-4" />
@@ -925,9 +985,9 @@ function NodeInspector({
 
         <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-4">
           <label className="block">
-            <span className="text-xs text-zinc-400">Title</span>
+            <span className="text-xs text-white/[0.56]">Title</span>
             <input
-              className="mt-2 h-10 w-full rounded-md border border-white/10 bg-[#19191d] px-3 text-sm text-zinc-100 outline-none focus:border-white/25"
+              className="mt-2 h-10 w-full rounded-[14px] border border-white/[0.09] bg-white/[0.04] px-3 text-sm text-white/[0.92] outline-none transition focus:border-[#f5b950]/45 focus:bg-white/[0.065]"
               value={title}
               onChange={(event) => setTitle(event.target.value)}
               onBlur={saveTitle}
@@ -936,9 +996,9 @@ function NodeInspector({
 
           {"text" in node.data || node.type === "brief" ? (
             <label className="block">
-              <span className="text-xs text-zinc-400">Prompt</span>
+              <span className="text-xs text-white/[0.56]">Prompt</span>
               <textarea
-                className="mt-2 min-h-48 w-full resize-none rounded-md border border-white/10 bg-[#19191d] px-3 py-3 text-sm leading-6 text-zinc-100 outline-none focus:border-white/25"
+                className="mt-2 min-h-48 w-full resize-none rounded-[14px] border border-white/[0.09] bg-white/[0.04] px-3 py-3 text-sm leading-6 text-white/[0.84] outline-none transition focus:border-[#f5b950]/45 focus:bg-white/[0.065]"
                 value={text}
                 onChange={(event) => setText(event.target.value)}
                 onBlur={saveText}
@@ -946,11 +1006,11 @@ function NodeInspector({
             </label>
           ) : null}
 
-          <div className="rounded-md border border-white/10 bg-[#19191d] p-3">
+          <div className="rounded-[14px] border border-white/[0.09] bg-white/[0.04] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
             <div className="flex items-center justify-between text-xs">
-              <span className="text-zinc-500">Status</span>
-              <span className="flex items-center gap-2 capitalize text-zinc-200">
-                <Circle className="h-2 w-2 fill-emerald-300 text-emerald-300" />
+              <span className="text-white/[0.48]">Status</span>
+              <span className="flex items-center gap-2 capitalize text-white/[0.84]">
+                <Circle className="h-2 w-2 fill-[#6aa6ff] text-[#6aa6ff]" />
                 {status}
               </span>
             </div>
@@ -958,7 +1018,7 @@ function NodeInspector({
 
           {node.type === "image_output" ? (
             <button
-              className="flex h-10 w-full items-center justify-center gap-2 rounded-md border border-white/10 bg-white/[0.04] text-sm text-zinc-100 transition hover:bg-white/[0.08]"
+              className="flex h-10 w-full items-center justify-center gap-2 rounded-[14px] border border-white/[0.10] bg-white/[0.055] text-sm text-white/[0.88] transition hover:bg-white/[0.10]"
               onClick={() => toggleImageSelected(node.id, "human")}
             >
               <Wand2 className="h-4 w-4" />
@@ -967,13 +1027,13 @@ function NodeInspector({
           ) : null}
         </div>
 
-        <div className="border-t border-white/10 p-4">
+        <div className="border-t border-white/[0.08] p-4">
           <button
-            className="flex h-10 w-full items-center justify-center gap-2 rounded-md border border-red-300/15 bg-red-400/5 text-sm text-red-200 transition hover:bg-red-400/10"
+            className="flex h-10 w-full items-center justify-center gap-2 rounded-[14px] border border-[#ff7a70]/20 bg-[#ff7a70]/[7%] text-sm text-[#ffc5bf] transition hover:bg-[#ff7a70]/[12%]"
             onClick={() => deleteNode(node.id, "human")}
           >
             <Trash2 className="h-4 w-4" />
-            Delete box
+            Delete
           </button>
         </div>
       </div>
@@ -1009,6 +1069,9 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
   const selectNodes = useProjectStore((state) => state.selectNodes);
   const clearSelection = useProjectStore((state) => state.clearSelection);
   const createNode = useProjectStore((state) => state.createNode);
+  const duplicateSelectedNodes = useProjectStore(
+    (state) => state.duplicateSelectedNodes,
+  );
   const undo = useProjectStore((state) => state.undo);
   const redo = useProjectStore((state) => state.redo);
   const canUndo = useProjectStore((state) => state.canUndo);
@@ -1017,7 +1080,7 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
   const looseConnectionStartRef = useRef<LooseConnectionStart | null>(null);
   const connectionCompletedRef = useRef(false);
   const [zoom, setZoom] = useState(1);
-  const [connectionLineColor, setConnectionLineColor] = useState("#52d6b1");
+  const [connectionLineColor, setConnectionLineColor] = useState("#6aa6ff");
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
@@ -1048,6 +1111,7 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
     () =>
       project.selectedNodeIds
         .map((nodeId) => project.nodes.find((node) => node.id === nodeId))
+        .filter((node) => node?.type !== "image_output")
         .filter((node): node is PostliminalNode => Boolean(node)),
     [project.nodes, project.selectedNodeIds],
   );
@@ -1064,14 +1128,15 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
     };
 
     project.edges.forEach((edge) => {
-      markConnected(edge.source, edgeSourceHandle(edge.type));
+      const sourceNode = nodeById.get(edge.source);
+      const targetNode = nodeById.get(edge.target);
 
       if (
         edge.type === "generated" &&
-        nodeById.get(edge.source)?.type === "image_generation" &&
-        nodeById.get(edge.target)?.type === "image_output"
+        sourceNode?.type === "image_generation" &&
+        targetNode?.type === "image_output"
       ) {
-        const imageUrl = nodeById.get(edge.target)?.data.imageUrl;
+        const imageUrl = targetNode.data.imageUrl;
         generatedOutputCounts.set(
           edge.source,
           (generatedOutputCounts.get(edge.source) ?? 0) + 1,
@@ -1084,31 +1149,60 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
         }
       }
 
-      if (nodeById.get(edge.target)?.type !== "prompt") {
+      if (sourceNode?.type === "image_output" || targetNode?.type === "image_output") {
+        return;
+      }
+
+      markConnected(edge.source, edgeSourceHandle(edge.type));
+
+      if (targetNode?.type !== "prompt") {
         markConnected(edge.target, edgeTargetHandle(edge.type));
       }
     });
 
-    return project.nodes.map((node) => ({
-      id: node.id,
-      type: node.type,
-      position: node.position,
-      data: {
-        ...node.data,
-        nodeType: node.type,
-        generatedImageCount: generatedOutputCounts.get(node.id) ?? 0,
-        generatedImageUrls: generatedImageUrls.get(node.id) ?? [],
-        connectedHandles: Object.fromEntries(
-          Array.from(connectedHandles.get(node.id) ?? []).map((handleId) => [
-            handleId,
-            true,
-          ]),
-        ),
-      },
-      selected: project.selectedNodeIds.includes(node.id),
-      zIndex:
-        node.type === "group" || node.type === "selection_group" ? 0 : 5,
-    }));
+    return project.nodes
+      .filter((node) => node.type !== "image_output")
+      .map((node) => {
+        const nodeGeneratedImageUrls = Array.isArray(node.data.generatedImageUrls)
+          ? node.data.generatedImageUrls.filter(
+              (imageUrl): imageUrl is string => typeof imageUrl === "string",
+            )
+          : [];
+        const outputNodeImageUrls = generatedImageUrls.get(node.id) ?? [];
+        const combinedImageUrls = Array.from(
+          new Set([...nodeGeneratedImageUrls, ...outputNodeImageUrls]),
+        );
+        const storedGeneratedImageCount =
+          typeof node.data.generatedImageCount === "number"
+            ? node.data.generatedImageCount
+            : 0;
+        const outputNodeCount = generatedOutputCounts.get(node.id) ?? 0;
+
+        return {
+          id: node.id,
+          type: node.type,
+          position: node.position,
+          data: {
+            ...node.data,
+            nodeType: node.type,
+            generatedImageCount: Math.max(
+              storedGeneratedImageCount,
+              outputNodeCount,
+              combinedImageUrls.length,
+            ),
+            generatedImageUrls: combinedImageUrls,
+            connectedHandles: Object.fromEntries(
+              Array.from(connectedHandles.get(node.id) ?? []).map((handleId) => [
+                handleId,
+                true,
+              ]),
+            ),
+          },
+          selected: project.selectedNodeIds.includes(node.id),
+          zIndex:
+            node.type === "group" || node.type === "selection_group" ? 0 : 5,
+        };
+      });
   }, [project.edges, project.nodes, project.selectedNodeIds]);
 
   const [flowNodes, setFlowNodes] = useState<Node<NodeData>[]>(storeNodes);
@@ -1134,6 +1228,18 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
 
       const key = event.key.toLowerCase();
       const usesShortcutModifier = event.metaKey || event.ctrlKey;
+      const hasSelectedNodes = project.selectedNodeIds.length > 0;
+
+      if (usesShortcutModifier && key === "c" && hasSelectedNodes) {
+        event.preventDefault();
+        return;
+      }
+
+      if (usesShortcutModifier && key === "v" && hasSelectedNodes) {
+        event.preventDefault();
+        duplicateSelectedNodes("human");
+        return;
+      }
 
       if (usesShortcutModifier && key === "z") {
         event.preventDefault();
@@ -1165,12 +1271,25 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [disconnectNodes, redo, selectedEdgeIds, undo]);
+  }, [
+    disconnectNodes,
+    duplicateSelectedNodes,
+    project.selectedNodeIds.length,
+    redo,
+    selectedEdgeIds,
+    undo,
+  ]);
 
   useEffect(() => {
     const handlePaste = (event: ClipboardEvent) => {
       const target = event.target as HTMLElement | null;
       if (target?.closest("input, textarea, select, [contenteditable='true']")) {
+        return;
+      }
+
+      if (project.selectedNodeIds.length > 0) {
+        event.preventDefault();
+        duplicateSelectedNodes("human");
         return;
       }
 
@@ -1189,7 +1308,7 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
         createNode({
           type: "image_reference",
           createdBy: "human",
-          position: snapPosition(
+          position: snapCanvasPosition(
             screenToFlowPosition({
               x: window.innerWidth / 2,
               y: window.innerHeight / 2,
@@ -1208,20 +1327,30 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
 
     window.addEventListener("paste", handlePaste);
     return () => window.removeEventListener("paste", handlePaste);
-  }, [createNode, screenToFlowPosition]);
+  }, [createNode, duplicateSelectedNodes, project.selectedNodeIds.length, screenToFlowPosition]);
 
   const flowEdges = useMemo<Edge[]>(() => {
     const nodeById = new Map(project.nodes.map((node) => [node.id, node]));
 
     return project.edges
-      .filter((edge) => nodeById.get(edge.target)?.type !== "prompt")
+      .filter((edge) => {
+        const source = nodeById.get(edge.source);
+        const target = nodeById.get(edge.target);
+        return (
+          source &&
+          target &&
+          source.type !== "image_output" &&
+          target.type !== "image_output" &&
+          target.type !== "prompt"
+        );
+      })
       .map((edge) => ({
         id: edge.id,
         source: edge.source,
         target: edge.target,
         sourceHandle: edgeSourceHandle(edge.type),
         targetHandle: edgeTargetHandle(edge.type),
-        type: "weavy",
+        type: "liminal",
         selected: selectedEdgeIds.includes(edge.id),
         selectable: true,
         focusable: true,
@@ -1243,7 +1372,7 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
         if (change.type !== "position" || !change.position) return change;
         return {
           ...change,
-          position: snapPosition(change.position),
+          position: snapCanvasPosition(change.position),
         };
       });
 
@@ -1263,7 +1392,7 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
 
   const onNodeDragStop = useCallback(
     (_event: ReactMouseEvent, node: Node<NodeData>) => {
-      moveNode(node.id, snapPosition(node.position), "human");
+      moveNode(node.id, snapCanvasPosition(node.position), "human");
     },
     [moveNode],
   );
@@ -1403,7 +1532,7 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
     setContextMenu({
       x: Math.min(event.clientX, window.innerWidth - 230),
       y: Math.min(event.clientY, window.innerHeight - 260),
-      position: snapPosition(flowPosition),
+      position: snapCanvasPosition(flowPosition),
     });
   };
 
@@ -1428,7 +1557,7 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
 
     createNode({
       type,
-      position: snapPosition(contextMenu.position),
+      position: snapCanvasPosition(contextMenu.position),
       createdBy: "human",
       data,
     });
@@ -1436,10 +1565,15 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
   };
 
   return (
-    <section className="relative h-full min-w-0 overflow-hidden bg-[#111114]">
+    <section className="postliminal-surface postliminal-canvas-surface relative h-full min-w-0 overflow-hidden">
       <AppSidebar
         onOpenProjects={onOpenProjects}
         onOpenSettings={() => setSettingsOpen(true)}
+        zoom={zoom}
+        canUndo={canUndo}
+        canRedo={canRedo}
+        onUndo={undo}
+        onRedo={redo}
       />
       <ProjectHeader title={project.title} />
       <NodeInspector nodes={selectedNodes} />
@@ -1454,22 +1588,14 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
           onClose={() => setSettingsOpen(false)}
         />
       ) : null}
-      <BottomToolbar
-        zoom={zoom}
-        canUndo={canUndo}
-        canRedo={canRedo}
-        onUndo={undo}
-        onRedo={redo}
-      />
-
       {project.nodes.length === 0 ? (
         <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-8 text-center">
           <div>
-            <div className="text-[11px] uppercase tracking-[0.26em] text-zinc-500">
-              Right click to create a box.
+            <div className="font-mono text-[11px] uppercase tracking-[0.26em] text-white/[0.52]">
+              Right click to add a node.
             </div>
-            <div className="mt-3 text-xl font-medium text-zinc-200">
-              Postliminal canvas
+            <div className="mt-3 text-xl font-medium text-white/[0.9]">
+              PostLiminal canvas
             </div>
           </div>
         </div>
@@ -1511,12 +1637,12 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
         maxZoom={2}
         connectionLineStyle={{
           stroke: connectionLineColor,
-          strokeWidth: 1.55,
+          strokeWidth: 1.4,
           strokeLinecap: "round",
-          filter: `drop-shadow(0 0 5px ${connectionLineColor}55)`,
+          filter: `drop-shadow(0 0 7px ${connectionLineColor}30)`,
         }}
         snapToGrid
-        snapGrid={snapGrid}
+        snapGrid={CANVAS_SNAP_GRID}
         zoomOnScroll={false}
         zoomActivationKeyCode={["Control", "Meta"]}
         panOnDrag={[1]}
@@ -1533,11 +1659,11 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
       >
         <Background
           variant={BackgroundVariant.Dots}
-          gap={GRID_GAP}
-          size={1}
+          gap={CANVAS_GRID_GAP}
+          size={1.05}
           offset={0.5}
-          color="rgba(156,156,168,0.42)"
-          bgColor="#111114"
+          color="rgba(174,185,179,0.34)"
+          bgColor="transparent"
         />
         <ViewportManager nodeCount={project.nodes.length} />
       </ReactFlow>

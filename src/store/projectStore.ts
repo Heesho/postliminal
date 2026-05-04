@@ -2,8 +2,14 @@
 
 import { create } from "zustand";
 import { createId } from "@/lib/id";
+import { snapCanvasPosition } from "@/lib/canvasGrid";
 import { DEFAULT_IMAGE_MODEL_ID, getImageModelOption } from "@/lib/imageModels";
-import { defaultNodeData, mockOutputGradient } from "@/lib/nodeDefaults";
+import { defaultNodeData } from "@/lib/nodeDefaults";
+import {
+  hydrateProjectGeneratedImages,
+  projectWithoutInlineGeneratedImages,
+  saveProjectGeneratedImages,
+} from "@/lib/projectImageStorage";
 import type {
   Actor,
   AgentAction,
@@ -135,15 +141,26 @@ function readStoredProjects(): ProjectState[] {
 
 function persistProject(project: ProjectState) {
   if (!canUseStorage()) return;
+  void saveProjectGeneratedImages(project).catch(() => undefined);
+
   const storedProjects = readStoredProjects();
+  const persistedProject = projectWithoutInlineGeneratedImages(project);
   const projects = [
-    project,
-    ...storedProjects.filter((item) => item.projectId !== project.projectId),
+    persistedProject,
+    ...storedProjects
+      .filter((item) => item.projectId !== project.projectId)
+      .map(projectWithoutInlineGeneratedImages),
   ];
 
-  window.localStorage.setItem(PROJECT_STORAGE_KEY, JSON.stringify(project));
-  window.localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
-  window.localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, project.projectId);
+  try {
+    window.localStorage.removeItem(PROJECT_STORAGE_KEY);
+    window.localStorage.removeItem(PROJECTS_STORAGE_KEY);
+    window.localStorage.setItem(PROJECT_STORAGE_KEY, JSON.stringify(persistedProject));
+    window.localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+    window.localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, project.projectId);
+  } catch (error) {
+    console.warn("PostLiminal could not persist the project locally.", error);
+  }
 }
 
 function parseProject(json: string | ProjectState): ProjectState {
@@ -162,7 +179,12 @@ function parseProject(json: string | ProjectState): ProjectState {
         ? DEFAULT_PROJECT_TITLE
         : project.title ?? DEFAULT_PROJECT_TITLE,
     dna: project.dna ?? {},
-    nodes: Array.isArray(project.nodes) ? project.nodes : [],
+    nodes: Array.isArray(project.nodes)
+      ? project.nodes.map((node) => ({
+          ...node,
+          position: snapCanvasPosition(node.position ?? { x: 120, y: 120 }),
+        }))
+      : [],
     edges: Array.isArray(project.edges) ? dedupeConnectorEdges(project.edges) : [],
     selectedNodeIds: Array.isArray(project.selectedNodeIds)
       ? project.selectedNodeIds
@@ -181,12 +203,29 @@ function getNodeTitle(node?: PostliminalNode) {
   return String(node?.data.title ?? node?.type ?? "node");
 }
 
+function generatedImageUrls(data: NodeData) {
+  return Array.isArray(data.generatedImageUrls)
+    ? data.generatedImageUrls.filter(
+        (imageUrl): imageUrl is string => typeof imageUrl === "string",
+      )
+    : [];
+}
+
 function operationPayloadForNode(node: PostliminalNode) {
   return {
     nodeId: node.id,
     nodeType: node.type,
     title: node.data.title ?? null,
   };
+}
+
+function cloneNodeDataForDuplicate(data: NodeData): NodeData {
+  const cloned = { ...data };
+  delete cloned.connectedHandles;
+  delete cloned.nodeType;
+  delete cloned.selected;
+
+  return cloned;
 }
 
 function cloneProject(project: ProjectState): ProjectState {
@@ -208,6 +247,7 @@ type ProjectStore = {
   undo: () => void;
   redo: () => void;
   createNode: (input: CreateNodeInput) => PostliminalNode;
+  duplicateSelectedNodes: (actor?: Actor) => PostliminalNode[];
   updateNode: (nodeId: string, patch: UpdateNodePatch, actor?: Actor) => void;
   deleteNode: (nodeId: string, actor?: Actor) => void;
   connectNodes: (
@@ -228,7 +268,6 @@ type ProjectStore = {
   resetProject: () => void;
   loadProject: (json: string | ProjectState) => void;
   exportProject: () => string;
-  createMockOutputs: (generationNodeId: string, actor?: Actor) => void;
   createImageOutputs: (
     generationNodeId: string,
     imageUrls: string[],
@@ -276,6 +315,21 @@ export const useProjectStore = create<ProjectStore>()((set, get) => {
       activeProjectId: committed.projectId,
     });
     persistProject(committed);
+  };
+
+  const restoreProjectImages = (projectId: string) => {
+    void hydrateProjectGeneratedImages(get().project)
+      .then((hydratedProject) => {
+        if (get().project.projectId !== projectId) return;
+        if (hydratedProject === get().project) return;
+
+        set({
+          project: hydratedProject,
+          projects: upsertProjectSummary(get().projects, hydratedProject),
+          activeProjectId: hydratedProject.projectId,
+        });
+      })
+      .catch(() => undefined);
   };
 
   return {
@@ -330,6 +384,7 @@ export const useProjectStore = create<ProjectStore>()((set, get) => {
         canUndo: false,
         canRedo: false,
       });
+      restoreProjectImages(project.projectId);
     },
 
     createProject: (title) => {
@@ -357,10 +412,7 @@ export const useProjectStore = create<ProjectStore>()((set, get) => {
       );
       if (!project) return;
 
-      if (canUseStorage()) {
-        window.localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, projectId);
-        window.localStorage.setItem(PROJECT_STORAGE_KEY, JSON.stringify(project));
-      }
+      persistProject(project);
 
       set({
         project,
@@ -371,6 +423,7 @@ export const useProjectStore = create<ProjectStore>()((set, get) => {
         canUndo: false,
         canRedo: false,
       });
+      restoreProjectImages(project.projectId);
     },
 
     undo: () => {
@@ -425,7 +478,7 @@ export const useProjectStore = create<ProjectStore>()((set, get) => {
       const node: PostliminalNode = {
         id: createId(type),
         type,
-        position: input.position ?? { x: 120, y: 120 },
+        position: snapCanvasPosition(input.position ?? { x: 120, y: 120 }),
         data: {
           ...defaultNodeData(type, sameTypeCount),
           ...input.data,
@@ -443,6 +496,70 @@ export const useProjectStore = create<ProjectStore>()((set, get) => {
       return node;
     },
 
+    duplicateSelectedNodes: (actor = "human") => {
+      const project = get().project;
+      const selectedIds = project.selectedNodeIds.filter((nodeId) =>
+        project.nodes.some(
+          (node) => node.id === nodeId && node.type !== "image_output",
+        ),
+      );
+      if (selectedIds.length === 0) return [];
+
+      const selectedIdSet = new Set(selectedIds);
+      const timestamp = now();
+      const idMap = new Map<string, string>();
+      const duplicatedNodes = project.nodes
+        .filter((node) => selectedIdSet.has(node.id))
+        .map((node) => {
+          const id = createId(node.type);
+          idMap.set(node.id, id);
+
+          return {
+            ...node,
+            id,
+            position: snapCanvasPosition({
+              x: node.position.x + 40,
+              y: node.position.y + 40,
+            }),
+            data: cloneNodeDataForDuplicate(node.data),
+            createdBy: actor,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          };
+        });
+
+      const duplicatedEdges = project.edges
+        .filter((edge) => idMap.has(edge.source) && idMap.has(edge.target))
+        .map((edge) => ({
+          ...edge,
+          id: createId("edge"),
+          source: idMap.get(edge.source) ?? edge.source,
+          target: idMap.get(edge.target) ?? edge.target,
+          createdBy: actor,
+          createdAt: timestamp,
+        }));
+
+      const nextSelectedNodeIds = duplicatedNodes.map((node) => node.id);
+      commit(
+        {
+          ...project,
+          nodes: [...project.nodes, ...duplicatedNodes],
+          edges: [...project.edges, ...duplicatedEdges],
+          selectedNodeIds: nextSelectedNodeIds,
+          selectedAssetIds: [],
+        },
+        "duplicate_nodes",
+        actor,
+        {
+          sourceNodeIds: selectedIds,
+          nodeIds: nextSelectedNodeIds,
+          edgeCount: duplicatedEdges.length,
+        },
+      );
+
+      return duplicatedNodes;
+    },
+
     updateNode: (nodeId, patch, actor = "human") => {
       const project = get().project;
       const existing = project.nodes.find((node) => node.id === nodeId);
@@ -452,7 +569,9 @@ export const useProjectStore = create<ProjectStore>()((set, get) => {
         if (node.id !== nodeId) return node;
         return {
           ...node,
-          position: patch.position ?? node.position,
+          position: patch.position
+            ? snapCanvasPosition(patch.position)
+            : node.position,
           data: patch.data ? { ...node.data, ...patch.data } : node.data,
           updatedAt: now(),
         };
@@ -704,7 +823,7 @@ export const useProjectStore = create<ProjectStore>()((set, get) => {
 
         const generation = get().createNode({
           type: "image_generation",
-          position: { x: prompt.position.x + 340, y: prompt.position.y + 6 },
+          position: { x: prompt.position.x + 340, y: prompt.position.y },
           createdBy: actor,
           data: {
             title: "Refinement Pass",
@@ -743,7 +862,7 @@ export const useProjectStore = create<ProjectStore>()((set, get) => {
       const group: PostliminalNode = {
         id: createId("group"),
         type: "group",
-        position: input.position ?? { x: minX, y: minY },
+        position: snapCanvasPosition(input.position ?? { x: minX, y: minY }),
         data: {
           ...defaultNodeData("group"),
           title: input.title ?? "Selection Group",
@@ -779,18 +898,18 @@ export const useProjectStore = create<ProjectStore>()((set, get) => {
         (node) => node.type === "image_output",
       );
 
-      const rowSpacing = outputNodes.length > 0 ? 286 : 204;
+      const rowSpacing = outputNodes.length > 0 ? 280 : 200;
       const promptOrder = [...promptNodes].sort((a, b) =>
         a.createdAt.localeCompare(b.createdAt),
       );
       const positions = new Map<string, Position>();
 
       briefNodes.forEach((node, index) => {
-        positions.set(node.id, { x: 72, y: 160 + index * 220 });
+        positions.set(node.id, { x: 80, y: 160 + index * 220 });
       });
 
       promptOrder.forEach((prompt, index) => {
-        const y = 150 + index * rowSpacing;
+        const y = 160 + index * rowSpacing;
         positions.set(prompt.id, { x: 420, y });
 
         const generationEdge = project.edges.find(
@@ -801,7 +920,7 @@ export const useProjectStore = create<ProjectStore>()((set, get) => {
           : undefined;
 
         if (generation) {
-          positions.set(generation.id, { x: 770, y: y + 2 });
+          positions.set(generation.id, { x: 780, y });
           const outputs = project.edges
             .filter(
               (edge) => edge.source === generation.id && edge.type === "generated",
@@ -811,8 +930,8 @@ export const useProjectStore = create<ProjectStore>()((set, get) => {
 
           outputs.forEach((output, outputIndex) => {
             positions.set(output.id, {
-              x: 1116 + outputIndex * 258,
-              y: y - 6,
+              x: 1120 + outputIndex * 260,
+              y,
             });
           });
         }
@@ -822,25 +941,25 @@ export const useProjectStore = create<ProjectStore>()((set, get) => {
         (node) => !positions.has(node.id),
       );
       orphanGenerations.forEach((node, index) => {
-        positions.set(node.id, { x: 770, y: 72 + index * rowSpacing });
+        positions.set(node.id, { x: 780, y: 80 + index * rowSpacing });
       });
 
       const orphanOutputs = outputNodes.filter((node) => !positions.has(node.id));
       orphanOutputs.forEach((node, index) => {
-        positions.set(node.id, { x: 1116, y: 72 + index * rowSpacing });
+        positions.set(node.id, { x: 1120, y: 80 + index * rowSpacing });
       });
 
       project.nodes
         .filter((node) => node.type === "group" || node.type === "selection_group")
         .forEach((node, index) => {
-          positions.set(node.id, { x: 392, y: 22 + index * 86 });
+          positions.set(node.id, { x: 400, y: 20 + index * 80 });
         });
 
       const nodes = project.nodes.map((node) =>
         positions.has(node.id)
           ? {
               ...node,
-              position: positions.get(node.id) as Position,
+              position: snapCanvasPosition(positions.get(node.id) as Position),
               updatedAt: now(),
             }
           : node,
@@ -871,6 +990,7 @@ export const useProjectStore = create<ProjectStore>()((set, get) => {
         canRedo: false,
       });
       persistProject(project);
+      restoreProjectImages(project.projectId);
     },
 
     loadProject: (json) => {
@@ -889,58 +1009,10 @@ export const useProjectStore = create<ProjectStore>()((set, get) => {
         canRedo: false,
       });
       persistProject(project);
+      restoreProjectImages(project.projectId);
     },
 
     exportProject: () => JSON.stringify(get().project, null, 2),
-
-    createMockOutputs: (generationNodeId, actor = "human") => {
-      const generation = get().project.nodes.find(
-        (node) => node.id === generationNodeId && node.type === "image_generation",
-      );
-      if (!generation) return;
-
-      get().updateNode(
-        generationNodeId,
-        { data: { status: "running" } },
-        actor,
-      );
-
-      const existingOutputs = get().project.edges.filter(
-        (edge) => edge.source === generationNodeId && edge.type === "generated",
-      ).length;
-
-      for (let index = 0; index < 3; index += 1) {
-        const outputIndex = existingOutputs + index;
-        const sourceModel = getImageModelOption(generation.data.model);
-        const output = get().createNode({
-          type: "image_output",
-          createdBy: actor,
-          position: {
-            x: generation.position.x + 360 + index * 252,
-            y: generation.position.y,
-          },
-          data: {
-            title: `Output ${outputIndex + 1}`,
-            status: "completed",
-            selected: false,
-            gradient: mockOutputGradient(outputIndex),
-            seed: 2400 + outputIndex,
-            sourceModel: sourceModel.label,
-          } satisfies NodeData,
-        });
-        get().connectNodes(generationNodeId, output.id, "generated", actor);
-      }
-
-      get().updateNode(
-        generationNodeId,
-        { data: { status: "completed" } },
-        actor,
-      );
-      recordActivity("create_mock_outputs", actor, {
-        generationNodeId,
-        outputCount: 3,
-      });
-    },
 
     createImageOutputs: (
       generationNodeId,
@@ -954,35 +1026,24 @@ export const useProjectStore = create<ProjectStore>()((set, get) => {
       const urls = imageUrls.filter((imageUrl) => imageUrl.length > 0);
       if (!generation || urls.length === 0) return;
 
-      const existingOutputs = get().project.edges.filter(
-        (edge) => edge.source === generationNodeId && edge.type === "generated",
-      ).length;
       const sourceModel = getImageModelOption(generation.data.model);
-
-      urls.forEach((imageUrl, index) => {
-        const outputIndex = existingOutputs + index;
-        const output = get().createNode({
-          type: "image_output",
-          createdBy: actor,
-          position: {
-            x: generation.position.x + 360 + (index % 3) * 252,
-            y: generation.position.y + Math.floor(index / 3) * 260,
-          },
-          data: {
-            title: `Output ${outputIndex + 1}`,
-            status: "completed",
-            selected: false,
-            imageUrl,
-            sourceModel: sourceModel.label,
-            ...metadata,
-          } satisfies NodeData,
-        });
-        get().connectNodes(generationNodeId, output.id, "generated", actor);
-      });
+      const nextImageUrls = Array.from(
+        new Set([...generatedImageUrls(generation.data), ...urls]),
+      ).slice(-24);
 
       get().updateNode(
         generationNodeId,
-        { data: { status: "completed" } },
+        {
+          data: {
+            status: "completed",
+            generatedImageCount: nextImageUrls.length,
+            generatedImageUrls: nextImageUrls,
+            generatedImageMetadata: {
+              sourceModel: sourceModel.label,
+              ...metadata,
+            },
+          },
+        },
         actor,
       );
       recordActivity("create_image_outputs", actor, {

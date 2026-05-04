@@ -9,9 +9,12 @@ export type ImageGenerationInputs = {
 };
 
 export type GenerateImagesInput = ImageGenerationInputs & {
+  projectId: string;
+  generationNodeId: string;
   quality: string;
   resolution: string;
   runs: number;
+  signal?: AbortSignal;
 };
 
 export type GenerateImagesResult = {
@@ -19,6 +22,8 @@ export type GenerateImagesResult = {
   model: string;
   size: string;
 };
+
+const IMAGE_GENERATION_TIMEOUT_MS = 120000;
 
 function dataString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -55,20 +60,49 @@ export async function generateChatGptImages(
   input: GenerateImagesInput,
 ): Promise<GenerateImagesResult> {
   const settings = readLocalSettings();
-  const response = await fetch("/api/images/generate", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      apiKey: settings.openaiApiKey.trim(),
-      prompt: input.prompt,
-      imageUrls: input.imageUrls,
-      quality: input.quality,
-      resolution: input.resolution,
-      runs: input.runs,
-    }),
-  });
+  const timeoutController = new AbortController();
+  const timeoutId = window.setTimeout(
+    () => timeoutController.abort(),
+    IMAGE_GENERATION_TIMEOUT_MS,
+  );
+  const abortRequest = () => timeoutController.abort();
+
+  input.signal?.addEventListener("abort", abortRequest, { once: true });
+
+  let response: Response;
+  try {
+    response = await fetch("/api/images/generate", {
+      method: "POST",
+      signal: timeoutController.signal,
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        apiKey: settings.openaiApiKey.trim(),
+        projectId: input.projectId,
+        generationNodeId: input.generationNodeId,
+        prompt: input.prompt,
+        imageUrls: input.imageUrls,
+        quality: input.quality,
+        resolution: input.resolution,
+        runs: input.runs,
+      }),
+    });
+  } catch (error) {
+    if (timeoutController.signal.aborted) {
+      throw new Error(
+        input.signal?.aborted
+          ? "Image generation was cancelled."
+          : "Image generation timed out after 120 seconds.",
+      );
+    }
+
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+    input.signal?.removeEventListener("abort", abortRequest);
+  }
+
   const payload = (await response.json().catch(() => null)) as
     | Partial<GenerateImagesResult> & { error?: string }
     | null;
@@ -87,7 +121,7 @@ export async function generateChatGptImages(
 
   return {
     images,
-    model: typeof payload?.model === "string" ? payload.model : "gpt-image-1.5",
+    model: typeof payload?.model === "string" ? payload.model : "gpt-image-2",
     size: typeof payload?.size === "string" ? payload.size : input.resolution,
   };
 }

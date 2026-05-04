@@ -32,13 +32,13 @@ export function BriefNode({ data, selected }: NodeProps<FlowNode>) {
         connected={isHandleConnected(data, "prompt-out")}
       />
       <NodeHeader label={String(data.title ?? "Brief")} />
-      <div className="px-3">
-        <div className="max-h-40 overflow-hidden rounded-md bg-[#3a3a3f] px-4 py-3 text-[13px] leading-5 text-zinc-100/95">
+      <div className="px-4">
+        <div className="max-h-40 overflow-hidden rounded-[14px] border border-white/[0.08] bg-white/[0.035] px-4 py-3 text-[13px] leading-5 text-white/[0.74] shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]">
           {text || "Brief text"}
         </div>
       </div>
       <NodeFooter>
-        <AddFooterLabel>Add variable</AddFooterLabel>
+        <AddFooterLabel>Add field</AddFooterLabel>
       </NodeFooter>
     </NodeFrame>
   );

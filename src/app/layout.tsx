@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Postliminal",
+  title: "PostLiminal",
   description: "Agent-native generative canvas prototype",
 };
 

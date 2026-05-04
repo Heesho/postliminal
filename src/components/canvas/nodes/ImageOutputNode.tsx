@@ -36,11 +36,11 @@ export function ImageOutputNode({ data, selected }: NodeProps<FlowNode>) {
         connected={isHandleConnected(data, "image-out")}
       />
       <NodeHeader label={String(data.title ?? "image.png")} />
-      <div className="px-3">
+      <div className="px-4">
         <div
-          className={`relative h-40 overflow-hidden rounded-md border ${
-            isSelected ? "border-emerald-300/70" : "border-white/5"
-          } bg-[#f1ebdc]`}
+          className={`relative h-40 overflow-hidden rounded-[16px] border ${
+            isSelected ? "border-[#8de0c2]/70" : "border-white/[0.10]"
+          } bg-[#11121a] shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]`}
         >
           {imageUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
@@ -52,18 +52,18 @@ export function ImageOutputNode({ data, selected }: NodeProps<FlowNode>) {
           ) : (
             <>
               <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.9),rgba(244,238,222,0.55)_34%,rgba(22,105,122,0.1)_64%),radial-gradient(circle_at_72%_32%,rgba(198,160,76,0.85),transparent_10%),radial-gradient(circle_at_25%_78%,rgba(20,116,134,0.55),transparent_23%),linear-gradient(135deg,transparent_44%,rgba(63,74,62,0.62)_45%,rgba(63,74,62,0.35)_57%,transparent_58%)]" />
-              <div className="absolute left-7 top-7 max-w-40 text-[#222225]">
+              <div className="absolute left-7 top-7 max-w-40 text-[#15181c]">
                 <div className="text-lg font-semibold leading-5">
                   AI-native GTM engineering
                 </div>
-                <div className="mt-2 h-1.5 w-11 bg-[#222225]" />
+                <div className="mt-2 h-1.5 w-11 bg-[#15181c]" />
               </div>
             </>
           )}
         </div>
       </div>
       <NodeFooter>
-        <AddFooterLabel>Add more images</AddFooterLabel>
+        <AddFooterLabel>Add image input</AddFooterLabel>
       </NodeFooter>
     </NodeFrame>
   );

@@ -6,6 +6,7 @@ import type {
   ProjectState,
   UpdateNodePatch,
 } from "@/types/project";
+import { snapCanvasPosition } from "@/lib/canvasGrid";
 import { DEFAULT_IMAGE_MODEL_ID, getImageModelOption } from "@/lib/imageModels";
 
 const visualDirectionPrompts = [
@@ -57,7 +58,6 @@ type AgentRuntime = {
   createBranch: (input: { sourceNodeIds?: string[]; promptText?: string; createdBy?: Actor }) => void;
   createGroup: (input: { title?: string; nodeIds?: string[]; createdBy?: Actor }) => unknown;
   autoLayout: (actor?: Actor) => void;
-  createMockOutputs: (generationNodeId: string, actor?: Actor) => void;
 };
 
 function includesAny(message: string, terms: string[]) {
@@ -95,7 +95,7 @@ function ensureDirectionsGraph(message: string, api: AgentRuntime) {
     brief = api.createNode({
       type: "brief",
       createdBy: "agent",
-      position: { x: 72, y: 108 },
+      position: snapCanvasPosition({ x: 80, y: 100 }),
       data: {
         title: "Visual Direction Brief",
         text: message,
@@ -128,7 +128,7 @@ function ensureDirectionsGraph(message: string, api: AgentRuntime) {
       prompt = api.createNode({
         type: "prompt",
         createdBy: "agent",
-        position: { x: 420, y: 72 + index * 196 },
+        position: snapCanvasPosition({ x: 420, y: 80 + index * 200 }),
         data: {
           title: promptData.title,
           text: promptData.text,
@@ -160,7 +160,7 @@ function ensureDirectionsGraph(message: string, api: AgentRuntime) {
       generation = api.createNode({
         type: "image_generation",
         createdBy: "agent",
-        position: { x: 770, y: 74 + index * 196 },
+        position: snapCanvasPosition({ x: 780, y: 80 + index * 200 }),
         data: {
           title: `${promptData.title} Gen`,
           model: DEFAULT_IMAGE_MODEL_ID,
@@ -173,19 +173,6 @@ function ensureDirectionsGraph(message: string, api: AgentRuntime) {
   });
 
   api.autoLayout("agent");
-}
-
-function runAllImageGenerations(api: AgentRuntime) {
-  const generationNodes = api
-    .getProject()
-    .nodes.filter((node) => node.type === "image_generation");
-
-  generationNodes.forEach((node) => {
-    api.createMockOutputs(node.id, "agent");
-  });
-
-  api.autoLayout("agent");
-  return generationNodes.length;
 }
 
 function organizeCanvas(api: AgentRuntime) {
@@ -233,14 +220,11 @@ export function runAgentCommand(message: string, api: AgentRuntime) {
 
   if (includesAny(normalized, ["visual directions", "directions"])) {
     ensureDirectionsGraph(message, api);
-    return "Created a brief, 8 visual direction prompts, and a mock generation node for each prompt.";
+    return "Created a brief, 8 visual direction prompts, and an image model node for each prompt.";
   }
 
   if (normalized.includes("run") && normalized.includes("image")) {
-    const count = runAllImageGenerations(api);
-    return count > 0
-      ? `Ran mock image generation for ${count} generation node${count === 1 ? "" : "s"}.`
-      : "There are no image generation nodes yet.";
+    return "Use the Run button on an image model node to call the OpenAI image API. Mock image generation is disabled.";
   }
 
   if (includesAny(normalized, ["clean up", "organize"])) {

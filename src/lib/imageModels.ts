@@ -13,7 +13,7 @@ export const IMAGE_MODEL_OPTIONS: ImageModelOption[] = [
   {
     id: "chatgpt-images-2",
     provider: "openai",
-    label: "ChatGPT Images 2.0",
+    label: "GPT Image 2",
     nodeLabel: "Image Model",
   },
 ];

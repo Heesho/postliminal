@@ -17,7 +17,6 @@ function createAgentRuntime() {
     createBranch: store.createBranch,
     createGroup: store.createGroup,
     autoLayout: store.autoLayout,
-    createMockOutputs: store.createMockOutputs,
   };
 }
 

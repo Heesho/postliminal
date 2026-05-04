@@ -1,6 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+/* eslint-disable @next/next/no-img-element */
+
+import { useEffect, useRef, useState } from "react";
 import type { Node, NodeProps } from "@xyflow/react";
 import {
   ArrowRight,
@@ -18,6 +20,7 @@ import {
   DEFAULT_IMAGE_MODEL_ID,
   getImageModelOption,
 } from "@/lib/imageModels";
+import { normalizeOpenAiImageResolution } from "@/lib/openAiImagePricing";
 import {
   generateChatGptImages,
   resolveImageGenerationInputs,
@@ -25,12 +28,9 @@ import {
 import { useProjectStore } from "@/store/projectStore";
 import type { NodeData } from "@/types/project";
 import {
-  AddFooterLabel,
   CARD_HEADER_HEIGHT,
-  IMAGE_MODEL_HEIGHT,
   IMAGE_HANDLE_TOP,
   isHandleConnected,
-  NodeFooter,
   NodeFrame,
   PROMPT_HANDLE_TOP,
   SourceHandle,
@@ -42,6 +42,14 @@ const promptLabelTop = `calc(${PROMPT_HANDLE_TOP} - 20px)`;
 const imageLabelTop = `calc(${IMAGE_HANDLE_TOP} - 20px)`;
 const connectorLabel =
   "pointer-events-none absolute text-[10px] font-semibold leading-none tracking-wide";
+const imageModelWidth = 362;
+const minPreviewHeight = 220;
+const maxPreviewHeight = 560;
+
+type ImageSize = {
+  width: number;
+  height: number;
+};
 
 const frameBackgrounds = [
   "linear-gradient(180deg,rgba(255,248,226,0.92),rgba(230,222,197,0.4)_34%,rgba(29,123,139,0.82)_82%),radial-gradient(circle_at_82%_34%,rgba(174,139,70,0.75),transparent_12%),radial-gradient(circle_at_72%_60%,rgba(120,88,50,0.62),transparent_18%)",
@@ -54,7 +62,7 @@ const frameBackgrounds = [
 
 function previewBackground(index: number) {
   return {
-    backgroundColor: "#dcd4be",
+    backgroundColor: "#f4f4f4",
     backgroundImage: frameBackgrounds[index % frameBackgrounds.length],
     backgroundSize: "cover",
   };
@@ -67,14 +75,50 @@ function boundedRuns(value: unknown) {
   );
 }
 
+function parseImageSize(value: unknown): ImageSize | undefined {
+  if (typeof value !== "string") return undefined;
+
+  const match = value.match(/^(\d+)x(\d+)$/);
+  if (!match) return undefined;
+
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!Number.isFinite(width) || !Number.isFinite(height)) return undefined;
+  if (width <= 0 || height <= 0) return undefined;
+
+  return { width, height };
+}
+
+function metadataApiSize(data: NodeData) {
+  const metadata = data.generatedImageMetadata;
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return undefined;
+  }
+
+  const apiSize = (metadata as Record<string, unknown>).apiSize;
+  return typeof apiSize === "string" ? apiSize : undefined;
+}
+
+function previewHeightForSize(size: ImageSize) {
+  return Math.round(
+    Math.max(
+      minPreviewHeight,
+      Math.min(maxPreviewHeight, imageModelWidth * (size.height / size.width)),
+    ),
+  );
+}
+
 export function ImageGenerationNode({ id, data, selected }: NodeProps<FlowNode>) {
   const project = useProjectStore((state) => state.project);
   const updateNode = useProjectStore((state) => state.updateNode);
-  const createMockOutputs = useProjectStore((state) => state.createMockOutputs);
   const createImageOutputs = useProjectStore((state) => state.createImageOutputs);
+  const abortControllerRef = useRef<AbortController | null>(null);
   const [viewMode, setViewMode] = useState<"single" | "multi">("single");
   const [activeImage, setActiveImage] = useState(0);
   const [progress, setProgress] = useState(0);
+  const [loadedImageSizes, setLoadedImageSizes] = useState<Record<string, ImageSize>>(
+    {},
+  );
   const model = getImageModelOption(data.model);
   const hasPrompt = isHandleConnected(data, "prompt-in");
   const hasImageInput = isHandleConnected(data, "image-in");
@@ -89,28 +133,41 @@ export function ImageGenerationNode({ id, data, selected }: NodeProps<FlowNode>)
     : [];
   const previewCount = Math.max(
     0,
-    Math.min(24, generatedImageUrls.length || generatedImageCount),
+    Math.min(24, Math.max(generatedImageUrls.length, generatedImageCount)),
   );
   const hasPreview = previewCount > 0;
-  const resolution =
-    typeof data.resolution === "string" ? data.resolution : "2048x1152";
+  const resolution = normalizeOpenAiImageResolution(data.resolution);
+  const metadataSize = parseImageSize(metadataApiSize(data));
+  const configuredSize = parseImageSize(resolution) ?? { width: 1024, height: 1024 };
   const checkerStyle = {
-    backgroundColor: "#202024",
+    backgroundColor: "#11121a",
     backgroundImage:
-      "linear-gradient(45deg, #19191d 25%, transparent 25%), linear-gradient(-45deg, #19191d 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #19191d 75%), linear-gradient(-45deg, transparent 75%, #19191d 75%)",
+      "linear-gradient(45deg, #0c0c10 25%, transparent 25%), linear-gradient(-45deg, #0c0c10 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #0c0c10 75%), linear-gradient(-45deg, transparent 75%, #0c0c10 75%)",
     backgroundPosition: "0 0, 0 10px, 10px -10px, -10px 0",
     backgroundSize: "20px 20px",
   };
   const showMultiView = hasPreview && viewMode === "multi";
-  const previewStyle = (index: number) =>
-    generatedImageUrls[index]
-      ? {
-          backgroundColor: "#dcd4be",
-          backgroundImage: `url("${generatedImageUrls[index]}")`,
-          backgroundPosition: "center",
-          backgroundSize: "cover",
-        }
-      : previewBackground(index);
+  const activeImageUrl = generatedImageUrls[activeImage];
+  const activeImageSize =
+    (activeImageUrl ? loadedImageSizes[activeImageUrl] : undefined) ??
+    metadataSize ??
+    configuredSize;
+  const previewHeight = previewHeightForSize(activeImageSize);
+  const nodeHeight = CARD_HEADER_HEIGHT + previewHeight;
+  const rememberImageSize = (src: string, image: HTMLImageElement) => {
+    const width = image.naturalWidth;
+    const height = image.naturalHeight;
+    if (width <= 0 || height <= 0) return;
+
+    setLoadedImageSizes((current) => {
+      const existing = current[src];
+      if (existing?.width === width && existing.height === height) {
+        return current;
+      }
+
+      return { ...current, [src]: { width, height } };
+    });
+  };
 
   useEffect(() => {
     if (!isRunning) {
@@ -171,16 +228,22 @@ export function ImageGenerationNode({ id, data, selected }: NodeProps<FlowNode>)
       "human",
     );
 
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
+
     try {
       const result = await generateChatGptImages({
         ...inputs,
+        projectId: project.projectId,
+        generationNodeId: id,
         quality,
         resolution,
         runs,
+        signal: abortController.signal,
       });
 
       createImageOutputs(id, result.images, "human", {
-        sourceModel: "ChatGPT Images 2.0",
+        sourceModel: option.label,
         apiModel: result.model,
         apiSize: result.size,
         quality,
@@ -189,13 +252,11 @@ export function ImageGenerationNode({ id, data, selected }: NodeProps<FlowNode>)
       });
       updateNode(id, { data: { lastRunError: "" } }, "human");
     } catch (error) {
-      for (let index = 0; index < runs; index += 1) {
-        createMockOutputs(id, "human");
-      }
       updateNode(
         id,
         {
           data: {
+            status: "error",
             lastRunError:
               error instanceof Error
                 ? error.message
@@ -204,26 +265,44 @@ export function ImageGenerationNode({ id, data, selected }: NodeProps<FlowNode>)
         },
         "human",
       );
+    } finally {
+      if (abortControllerRef.current === abortController) {
+        abortControllerRef.current = null;
+      }
     }
+  };
+  const cancelRun = () => {
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    updateNode(
+      id,
+      {
+        data: {
+          status: "error",
+          lastRunError: "Image generation was cancelled.",
+        },
+      },
+      "human",
+    );
   };
 
   return (
     <NodeFrame
-      className="flex w-[362px] flex-col"
+      className="flex flex-col"
       selected={selected}
-      style={{ height: IMAGE_MODEL_HEIGHT }}
+      style={{ width: imageModelWidth, height: nodeHeight }}
     >
       {selected ? (
         <div
-          className={`${connectorLabel} right-full mr-5 w-16 text-right text-[#df72f4]`}
+          className={`${connectorLabel} right-full mr-4 w-16 text-right font-mono font-medium tracking-[0.08em] text-[#f5b950]`}
           style={{ top: promptLabelTop }}
         >
-          Prompt*
+          Prompt
         </div>
       ) : null}
       {selected ? (
         <div
-          className={`${connectorLabel} right-full mr-5 w-16 text-right text-[#52d6b1]`}
+          className={`${connectorLabel} right-full mr-4 w-16 text-right font-mono font-medium tracking-[0.08em] text-[#6aa6ff]`}
           style={{ top: imageLabelTop }}
         >
           Image
@@ -231,8 +310,8 @@ export function ImageGenerationNode({ id, data, selected }: NodeProps<FlowNode>)
       ) : null}
       {selected ? (
         <div
-          className={`${connectorLabel} left-full ml-5 w-12 text-left text-[#52d6b1]`}
-          style={{ top: promptLabelTop }}
+          className={`${connectorLabel} left-full ml-4 w-12 text-left font-mono font-medium tracking-[0.08em] text-[#6aa6ff]`}
+          style={{ top: imageLabelTop }}
         >
           Image
         </div>
@@ -252,62 +331,132 @@ export function ImageGenerationNode({ id, data, selected }: NodeProps<FlowNode>)
       <SourceHandle
         id="image-out"
         tone="image"
-        offset="prompt"
+        offset="image"
         connected={hasImageOutput}
       />
       <div
-        className="flex items-center justify-between px-4"
+        className="postliminal-node-header flex items-center justify-between gap-4 px-5"
         style={{ height: CARD_HEADER_HEIGHT }}
       >
-        <div className="flex min-w-0 items-center gap-2">
-          <Cpu className="h-4 w-4 shrink-0 text-zinc-300" />
-          <div className="truncate text-[13px] font-medium text-zinc-200/95">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-[10px] border border-[#6aa6ff]/25 bg-[#6aa6ff]/10 text-[#6aa6ff] shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_0_18px_rgba(106,166,255,0.10)]">
+            <Cpu className="h-4 w-4" />
+          </span>
+          <div className="truncate text-[13px] font-medium text-white/[0.92]">
             {model.nodeLabel}
           </div>
         </div>
-        <div className="text-sm leading-none text-zinc-300/70">...</div>
+        <div className="flex shrink-0 items-center">
+          {isRunning ? (
+            <div className="flex h-9 items-center gap-2 rounded-[11px] border border-white/[0.14] bg-white/[0.08] px-3 text-[11px] font-medium text-white/[0.9]">
+              <LoaderCircle className="h-3.5 w-3.5 animate-spin text-[#f5b950]" />
+              <span>{progress}%</span>
+              <button
+                type="button"
+                aria-label="Cancel image generation"
+                className="nodrag nopan grid h-5 w-5 place-items-center rounded-[7px] text-white/[0.52] transition hover:bg-white/[0.10] hover:text-white/[0.86]"
+                onPointerDown={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                }}
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                }}
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  cancelRun();
+                }}
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="nodrag nopan flex h-9 items-center gap-2 rounded-[11px] border border-white/[0.16] bg-white/[0.08] px-3 text-[11px] font-medium text-white/[0.9] shadow-[inset_0_1px_0_rgba(255,255,255,0.12)] transition hover:border-white/[0.26] hover:bg-white/[0.12]"
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                runModel();
+              }}
+            >
+              <ArrowRight className="h-3 w-3" />
+              Run
+            </button>
+          )}
+        </div>
       </div>
-      <div className="nodrag nopan min-h-0 flex-1 px-3">
+      <div className="nodrag nopan min-h-0 flex-1">
         <div
-          className="group/preview relative h-full overflow-hidden rounded-sm border border-black/10 bg-[#1b1b20]"
+          className={`group/preview relative h-full overflow-hidden rounded-b-[18px] rounded-t-none shadow-none ${
+            hasPreview ? "bg-transparent" : "bg-[#11121a]"
+          }`}
         >
           {showMultiView ? (
-            <div className="grid h-full grid-cols-3 gap-1.5 p-1.5">
+            <div className="grid h-full grid-cols-3 gap-1.5">
               {Array.from({ length: previewCount }).map((_, index) => (
                 <button
                   key={index}
-                  className={`nodrag nopan overflow-hidden rounded-md border transition ${
+                  className={`nodrag nopan overflow-hidden border transition ${
                     activeImage === index
-                      ? "border-[#e8e6c8] ring-1 ring-[#e8e6c8]/70"
-                      : "border-black/20"
+                      ? "border-white/[0.88] ring-1 ring-[#f5b950]/60"
+                      : "border-black/25"
                   }`}
-                  style={previewStyle(index)}
+                  style={
+                    generatedImageUrls[index] ? undefined : previewBackground(index)
+                  }
                   onClick={() => setActiveImage(index)}
                   title={`Image ${index + 1}`}
                 >
+                  {generatedImageUrls[index] ? (
+                    // Render the returned PNG directly; do not recolor it with CSS.
+                    <img
+                      src={generatedImageUrls[index]}
+                      alt={`Generated image ${index + 1}`}
+                      className="block h-full w-full object-contain"
+                      draggable={false}
+                      onLoad={(event) =>
+                        rememberImageSize(
+                          generatedImageUrls[index],
+                          event.currentTarget,
+                        )
+                      }
+                    />
+                  ) : null}
                   <span className="sr-only">Image {index + 1}</span>
                 </button>
               ))}
             </div>
-          ) : (
-            <div
-              className="h-full w-full"
-              style={hasPreview ? previewStyle(activeImage) : checkerStyle}
+          ) : hasPreview && activeImageUrl ? (
+            <img
+              src={activeImageUrl}
+              alt="Generated image"
+              className="block h-full w-full object-contain"
+              draggable={false}
+              onLoad={(event) =>
+                rememberImageSize(activeImageUrl, event.currentTarget)
+              }
             />
+          ) : hasPreview ? (
+            <div className="h-full w-full" style={previewBackground(activeImage)} />
+          ) : (
+            <div className="h-full w-full" style={checkerStyle} />
           )}
 
           {hasPreview ? (
             <div className="pointer-events-none absolute inset-0 opacity-0 transition-opacity duration-150 group-hover/preview:opacity-100">
-              <div className="absolute inset-x-0 top-0 h-20 bg-gradient-to-b from-black/45 to-transparent" />
-              <div className="absolute inset-x-0 bottom-0 h-20 bg-gradient-to-t from-black/45 to-transparent" />
+              <div className="absolute inset-x-0 top-0 h-20 bg-gradient-to-b from-black/46 to-transparent" />
+              <div className="absolute inset-x-0 bottom-0 h-20 bg-gradient-to-t from-black/46 to-transparent" />
             </div>
           ) : null}
 
           {hasPreview ? (
             <div className="absolute inset-x-2 top-2 flex items-center justify-between opacity-0 transition-opacity duration-150 group-hover/preview:opacity-100">
-              <div className="flex items-center gap-2 rounded-md bg-black/10 px-1.5 py-1 text-[10px] font-medium text-white/80 backdrop-blur-sm">
+              <div className="flex items-center gap-2 rounded-[10px] border border-white/[0.10] bg-black/28 px-1.5 py-1 font-mono text-[10px] font-medium text-white/80 backdrop-blur-md">
                 <button
-                  className="nodrag nopan grid h-5 w-5 place-items-center rounded text-white/75 transition hover:bg-white/10 hover:text-white"
+                  className="nodrag nopan grid h-5 w-5 place-items-center rounded-[7px] text-white/75 transition hover:bg-white/10 hover:text-white"
                   title={viewMode === "single" ? "Multi view" : "Single view"}
                   onClick={() =>
                     setViewMode((mode) => (mode === "single" ? "multi" : "single"))
@@ -324,7 +473,7 @@ export function ImageGenerationNode({ id, data, selected }: NodeProps<FlowNode>)
                 ) : (
                   <>
                     <button
-                      className="nodrag nopan grid h-5 w-5 place-items-center rounded text-white/65 transition hover:bg-white/10 hover:text-white"
+                      className="nodrag nopan grid h-5 w-5 place-items-center rounded-[7px] text-white/65 transition hover:bg-white/10 hover:text-white"
                       title="Previous image"
                       onClick={previousImage}
                     >
@@ -334,7 +483,7 @@ export function ImageGenerationNode({ id, data, selected }: NodeProps<FlowNode>)
                       {activeImage + 1} / {previewCount}
                     </span>
                     <button
-                      className="nodrag nopan grid h-5 w-5 place-items-center rounded text-white/65 transition hover:bg-white/10 hover:text-white"
+                      className="nodrag nopan grid h-5 w-5 place-items-center rounded-[7px] text-white/65 transition hover:bg-white/10 hover:text-white"
                       title="Next image"
                       onClick={nextImage}
                     >
@@ -344,15 +493,15 @@ export function ImageGenerationNode({ id, data, selected }: NodeProps<FlowNode>)
                 )}
               </div>
 
-              <div className="flex items-center gap-1 rounded-md bg-black/10 px-1.5 py-1 text-white/75 backdrop-blur-sm">
+              <div className="flex items-center gap-1 rounded-[10px] border border-white/[0.10] bg-black/28 px-1.5 py-1 text-white/75 backdrop-blur-md">
                 <button
-                  className="nodrag nopan grid h-5 w-5 place-items-center rounded transition hover:bg-white/10 hover:text-white"
+                  className="nodrag nopan grid h-5 w-5 place-items-center rounded-[7px] transition hover:bg-white/10 hover:text-white"
                   title="Expand image"
                 >
                   <Expand className="h-3.5 w-3.5" />
                 </button>
                 <button
-                  className="nodrag nopan grid h-5 w-5 place-items-center rounded transition hover:bg-white/10 hover:text-white"
+                  className="nodrag nopan grid h-5 w-5 place-items-center rounded-[7px] transition hover:bg-white/10 hover:text-white"
                   title="Download image"
                 >
                   <Download className="h-3.5 w-3.5" />
@@ -362,30 +511,12 @@ export function ImageGenerationNode({ id, data, selected }: NodeProps<FlowNode>)
           ) : null}
 
           {hasPreview && !showMultiView ? (
-            <div className="absolute bottom-2 left-2 rounded-sm bg-black/35 px-1.5 py-0.5 text-[9px] font-medium text-white/85 opacity-0 transition-opacity duration-150 group-hover/preview:opacity-100">
+            <div className="absolute bottom-2 left-2 rounded-[7px] border border-white/[0.10] bg-black/38 px-1.5 py-0.5 font-mono text-[9px] font-medium text-white/85 opacity-0 backdrop-blur-md transition-opacity duration-150 group-hover/preview:opacity-100">
               {resolution}
             </div>
           ) : null}
         </div>
       </div>
-      <NodeFooter className="nodrag nopan shrink-0">
-        <AddFooterLabel>Add another image input</AddFooterLabel>
-        {isRunning ? (
-          <div className="flex h-9 items-center gap-2 rounded-md border border-white/20 bg-[#303036] px-3 text-[11px] font-medium text-zinc-100">
-            <LoaderCircle className="h-3.5 w-3.5 animate-spin text-zinc-200" />
-            <span>{progress}%</span>
-            <X className="h-3.5 w-3.5 text-zinc-400" />
-          </div>
-        ) : (
-          <button
-            className="flex h-9 items-center gap-2 rounded-md border border-white/20 bg-[#303036] px-3 text-[11px] font-medium text-zinc-100 transition hover:bg-[#3a3a40]"
-            onClick={runModel}
-          >
-            <ArrowRight className="h-3 w-3" />
-            Run Model
-          </button>
-        )}
-      </NodeFooter>
     </NodeFrame>
   );
 }

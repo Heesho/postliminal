@@ -1,4 +1,10 @@
 import { NextResponse } from "next/server";
+import { mkdir, writeFile } from "fs/promises";
+import path from "path";
+import {
+  DEFAULT_OPENAI_IMAGE_API_MODEL,
+  OPENAI_IMAGE_MODEL_CANDIDATES,
+} from "@/lib/openAiImagePricing";
 
 export const runtime = "nodejs";
 
@@ -9,6 +15,8 @@ type GenerateImagesRequest = {
   quality?: unknown;
   resolution?: unknown;
   runs?: unknown;
+  projectId?: unknown;
+  generationNodeId?: unknown;
 };
 
 type OpenAIImageItem = {
@@ -25,6 +33,8 @@ type OpenAIImagesResponse = {
 
 const supportedSizes = new Set(["1024x1024", "1536x1024", "1024x1536"]);
 const supportedQualities = new Set(["low", "medium", "high", "auto"]);
+const OPENAI_IMAGE_TIMEOUT_MS = 120000;
+const PROJECT_ASSETS_DIR = path.join(process.cwd(), "projects");
 
 function stringValue(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -58,6 +68,77 @@ function normalizeImageUrls(value: unknown) {
     .slice(0, 8);
 }
 
+function safePathSegment(value: unknown, fallback: string) {
+  const segment = stringValue(value)
+    .replace(/[^a-zA-Z0-9_-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 96);
+
+  return segment || fallback;
+}
+
+function extensionForMime(mimeType: string) {
+  if (mimeType.includes("jpeg") || mimeType.includes("jpg")) return "jpg";
+  if (mimeType.includes("webp")) return "webp";
+  return "png";
+}
+
+async function imageBufferFromUrl(imageUrl: string) {
+  const dataUrlMatch = imageUrl.match(/^data:(image\/[^;]+);base64,(.+)$/);
+  if (dataUrlMatch) {
+    return {
+      buffer: Buffer.from(dataUrlMatch[2], "base64"),
+      extension: extensionForMime(dataUrlMatch[1]),
+    };
+  }
+
+  const response = await fetch(imageUrl);
+  if (!response.ok) {
+    throw new Error(`Failed to download generated image (${response.status})`);
+  }
+
+  const contentType = response.headers.get("content-type") ?? "image/png";
+  return {
+    buffer: Buffer.from(await response.arrayBuffer()),
+    extension: extensionForMime(contentType),
+  };
+}
+
+async function saveGeneratedImages({
+  projectId,
+  generationNodeId,
+  images,
+}: {
+  projectId: string;
+  generationNodeId: string;
+  images: string[];
+}) {
+  const assetDir = path.join(
+    PROJECT_ASSETS_DIR,
+    projectId,
+    "images",
+    generationNodeId,
+  );
+  await mkdir(assetDir, { recursive: true });
+
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+
+  return Promise.all(
+    images.map(async (imageUrl, index) => {
+      const image = await imageBufferFromUrl(imageUrl);
+      const fileName = `${timestamp}-${index + 1}.${image.extension}`;
+      const filePath = path.join(assetDir, fileName);
+      await writeFile(filePath, image.buffer);
+
+      return {
+        filePath,
+        url: `/api/project-assets/${projectId}/images/${generationNodeId}/${fileName}`,
+      };
+    }),
+  );
+}
+
 async function callOpenAIImages({
   apiKey,
   model,
@@ -76,36 +157,53 @@ async function callOpenAIImages({
   runs: number;
 }) {
   const isEdit = imageUrls.length > 0;
-  const response = await fetch(
-    `https://api.openai.com/v1/images/${isEdit ? "edits" : "generations"}`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), OPENAI_IMAGE_TIMEOUT_MS);
+  let response: Response;
+
+  try {
+    response = await fetch(
+      `https://api.openai.com/v1/images/${isEdit ? "edits" : "generations"}`,
+      {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(
+          isEdit
+            ? {
+                model,
+                prompt,
+                images: imageUrls.map((imageUrl) => ({ image_url: imageUrl })),
+                n: runs,
+                quality,
+                size,
+                background: "opaque",
+                output_format: "png",
+              }
+            : {
+                model,
+                prompt,
+                n: runs,
+                quality,
+                size,
+                background: "opaque",
+                output_format: "png",
+              },
+        ),
       },
-      body: JSON.stringify(
-        isEdit
-          ? {
-              model,
-              prompt,
-              images: imageUrls.map((imageUrl) => ({ image_url: imageUrl })),
-              n: runs,
-              quality,
-              size,
-              output_format: "png",
-            }
-          : {
-              model,
-              prompt,
-              n: runs,
-              quality,
-              size,
-              output_format: "png",
-            },
-      ),
-    },
-  );
+    );
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error("OpenAI image API timed out after 120 seconds");
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   const payload = (await response.json().catch(() => null)) as
     | OpenAIImagesResponse
@@ -152,11 +250,22 @@ export async function POST(request: Request) {
   const size = normalizeSize(body.resolution);
   const runs = clampRuns(body.runs);
   const imageUrls = normalizeImageUrls(body.imageUrls);
-  const configuredModel = process.env.OPENAI_IMAGE_MODEL || "gpt-image-1.5";
-  const modelCandidates =
-    configuredModel === "gpt-image-1.5"
-      ? ["gpt-image-1.5", "gpt-image-1"]
-      : [configuredModel];
+  const projectId = safePathSegment(body.projectId, "untitled-project");
+  const generationNodeId = safePathSegment(
+    body.generationNodeId,
+    "image-generation",
+  );
+  const configuredModel =
+    process.env.OPENAI_IMAGE_MODEL || DEFAULT_OPENAI_IMAGE_API_MODEL;
+  const modelCandidates = OPENAI_IMAGE_MODEL_CANDIDATES.includes(
+    configuredModel as (typeof OPENAI_IMAGE_MODEL_CANDIDATES)[number],
+  )
+    ? OPENAI_IMAGE_MODEL_CANDIDATES.slice(
+        OPENAI_IMAGE_MODEL_CANDIDATES.indexOf(
+          configuredModel as (typeof OPENAI_IMAGE_MODEL_CANDIDATES)[number],
+        ),
+      )
+    : [configuredModel];
 
   let lastError = "Image generation failed";
   for (const model of modelCandidates) {
@@ -170,9 +279,15 @@ export async function POST(request: Request) {
         size,
         runs,
       });
+      const savedImages = await saveGeneratedImages({
+        projectId,
+        generationNodeId,
+        images,
+      });
 
       return NextResponse.json({
-        images,
+        images: savedImages.map((image) => image.url),
+        files: savedImages.map((image) => image.filePath),
         model,
         size,
       });

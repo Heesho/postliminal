@@ -1,7 +1,6 @@
 "use client";
 
 import type { Node, NodeProps } from "@xyflow/react";
-import { TextCursorInput } from "lucide-react";
 import {
   useEffect,
   useLayoutEffect,
@@ -9,6 +8,7 @@ import {
   useState,
   type WheelEvent,
 } from "react";
+import { TextCursorInput } from "lucide-react";
 import { useProjectStore } from "@/store/projectStore";
 import type { NodeData } from "@/types/project";
 import {
@@ -22,8 +22,7 @@ import {
 
 type FlowNode = Node<NodeData>;
 const promptLabelTop = `calc(${PROMPT_HANDLE_TOP} - 20px)`;
-const promptBodyPaddingBottom = 12;
-const promptNodeChromeHeight = CARD_HEADER_HEIGHT + promptBodyPaddingBottom;
+const promptNodeChromeHeight = CARD_HEADER_HEIGHT;
 const promptGridSize = 20;
 const promptTextMinHeight = 84;
 const promptTextMaxHeight = IMAGE_MODEL_HEIGHT - promptNodeChromeHeight;
@@ -75,8 +74,27 @@ export function PromptNode({ id, data, selected }: NodeProps<FlowNode>) {
     if (draft === text) return;
     updateNode(id, { data: { text: draft } }, "human");
   };
-  const stopCanvasWheel = (event: WheelEvent<HTMLTextAreaElement>) => {
-    event.stopPropagation();
+  const handleTextareaWheel = (event: WheelEvent<HTMLTextAreaElement>) => {
+    if (!selected) {
+      event.currentTarget.blur();
+      return;
+    }
+
+    const textarea = event.currentTarget;
+    const canScrollVertically = textarea.scrollHeight > textarea.clientHeight + 1;
+    const isMostlyVertical = Math.abs(event.deltaY) >= Math.abs(event.deltaX);
+
+    if (!canScrollVertically || !isMostlyVertical) return;
+
+    const isScrollingDown = event.deltaY > 0;
+    const isScrollingUp = event.deltaY < 0;
+    const hasRoomAbove = textarea.scrollTop > 0;
+    const hasRoomBelow =
+      textarea.scrollTop + textarea.clientHeight < textarea.scrollHeight - 1;
+
+    if ((isScrollingDown && hasRoomBelow) || (isScrollingUp && hasRoomAbove)) {
+      event.stopPropagation();
+    }
   };
 
   return (
@@ -87,7 +105,7 @@ export function PromptNode({ id, data, selected }: NodeProps<FlowNode>) {
     >
       {selected ? (
         <div
-          className="pointer-events-none absolute left-full ml-5 w-14 text-left text-[10px] font-semibold leading-none tracking-wide text-[#df72f4]"
+          className="pointer-events-none absolute left-full ml-4 w-16 text-left font-mono text-[10px] font-medium leading-none tracking-[0.08em] text-[#f5b950]"
           style={{ top: promptLabelTop }}
         >
           Prompt
@@ -100,33 +118,35 @@ export function PromptNode({ id, data, selected }: NodeProps<FlowNode>) {
         connected={isHandleConnected(data, "prompt-out")}
       />
       <div
-        className="flex items-center justify-between px-4"
+        className="postliminal-node-header flex items-center justify-between px-5"
         style={{ height: CARD_HEADER_HEIGHT }}
       >
-        <div className="flex min-w-0 items-center gap-2">
-          <TextCursorInput className="h-4 w-4 shrink-0 text-zinc-300" />
-          <div className="truncate text-[13px] font-medium text-zinc-200/95">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-[10px] border border-[#f5b950]/25 bg-[#f5b950]/10 text-[#f5b950] shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_0_18px_rgba(245,185,80,0.10)]">
+            <TextCursorInput className="h-4 w-4" />
+          </span>
+          <div className="truncate text-[13px] font-medium text-white/[0.92]">
             Prompt
           </div>
         </div>
-        <div className="text-sm leading-none text-zinc-300/70">...</div>
       </div>
       <div
-        className={`nodrag nopan px-3 pb-3 ${
+        className={`nodrag nopan ${
           isAtMaxHeight ? "min-h-0 flex-1" : ""
         }`}
       >
         <textarea
           ref={textareaRef}
-          className="nowheel w-full resize-none overflow-y-auto overscroll-contain rounded-md border-0 bg-[#3a3a3f] px-4 py-3 text-[16px] font-medium leading-7 text-zinc-100/95 outline-none transition focus:bg-[#414146] focus:ring-1 focus:ring-white/15"
+          className={`block w-full resize-none rounded-b-[18px] rounded-t-none border-0 bg-[#17181d] px-5 py-4 text-[13px] font-normal leading-[1.55] text-white/[0.76] outline-none shadow-none transition focus:bg-[#1b1c22] ${
+            selected ? "overflow-y-auto overscroll-contain" : "overflow-y-hidden"
+          }`}
           style={{ height: isAtMaxHeight ? "100%" : textareaHeight }}
           value={draft}
           placeholder="Prompt text"
           spellCheck={false}
           onChange={(event) => setDraft(event.target.value)}
           onBlur={saveDraft}
-          onWheelCapture={stopCanvasWheel}
-          onWheel={stopCanvasWheel}
+          onWheelCapture={handleTextareaWheel}
           onKeyDown={(event) => {
             if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
               event.currentTarget.blur();

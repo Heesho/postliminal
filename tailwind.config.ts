@@ -9,19 +9,21 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        night: "#050507",
-        ink: "#0a0b0f",
-        fog: "#b8bbc7",
-        gold: "#d7b765",
-        violet: "#8b7cf6",
-        cyan: "#6ee7f9"
+        night: "#07070a",
+        ink: "#11121a",
+        fog: "rgba(255,255,255,0.52)",
+        gold: "#f5b950",
+        violet: "#6aa6ff",
+        cyan: "#8de0c2",
       },
       boxShadow: {
-        liminal: "0 24px 80px rgba(0, 0, 0, 0.45)"
+        liminal: "0 24px 80px rgba(0, 0, 0, 0.48)",
       },
       fontFamily: {
-        sans: ["Inter", "ui-sans-serif", "system-ui", "sans-serif"]
-      }
+        sans: ["Inter", "ui-sans-serif", "system-ui", "sans-serif"],
+        mono: ["JetBrains Mono", "ui-monospace", "monospace"],
+        serif: ["Instrument Serif", "ui-serif", "Georgia", "serif"],
+      },
     },
   },
   plugins: [],
