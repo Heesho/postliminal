@@ -119,6 +119,7 @@ export function ImageGenerationNode({ id, data, selected }: NodeProps<FlowNode>)
   const [loadedImageSizes, setLoadedImageSizes] = useState<Record<string, ImageSize>>(
     {},
   );
+  const previousPreviewCountRef = useRef(0);
   const model = getImageModelOption(data.model);
   const hasPrompt = isHandleConnected(data, "prompt-in");
   const hasImageInput = isHandleConnected(data, "image-in");
@@ -188,9 +189,17 @@ export function ImageGenerationNode({ id, data, selected }: NodeProps<FlowNode>)
   }, [isRunning]);
 
   useEffect(() => {
+    const previousPreviewCount = previousPreviewCountRef.current;
+    previousPreviewCountRef.current = previewCount;
+
     if (!hasPreview) {
       setViewMode("single");
       setActiveImage(0);
+      return;
+    }
+
+    if (previewCount > previousPreviewCount) {
+      setActiveImage(previewCount - 1);
       return;
     }
 

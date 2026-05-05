@@ -89,7 +89,11 @@ import { BriefNode } from "./nodes/BriefNode";
 import { GroupNode } from "./nodes/GroupNode";
 import { ImageGenerationNode } from "./nodes/ImageGenerationNode";
 import { ImageOutputNode } from "./nodes/ImageOutputNode";
-import { IMAGE_HANDLE_TOP, PROMPT_HANDLE_TOP } from "./nodes/NodePrimitives";
+import {
+  IMAGE_HANDLE_TOP,
+  IMAGE_MODEL_HEIGHT,
+  PROMPT_HANDLE_TOP,
+} from "./nodes/NodePrimitives";
 import { PromptNode } from "./nodes/PromptNode";
 
 const nodeTypes = {
@@ -345,13 +349,74 @@ function SettingsPanel({
   );
 }
 
-function ProjectHeader({ title }: { title: string }) {
+function ProjectHeader({
+  title,
+  onRename,
+}: {
+  title: string;
+  onRename: (title: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(title);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (!editing) {
+      setDraft(title);
+    }
+  }, [editing, title]);
+
+  useEffect(() => {
+    if (!editing) return;
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, [editing]);
+
+  const save = () => {
+    const nextTitle = draft.trim() || "Untitled project";
+    onRename(nextTitle);
+    setDraft(nextTitle);
+    setEditing(false);
+  };
+  const cancel = () => {
+    setDraft(title);
+    setEditing(false);
+  };
+
   return (
     <div
-      className="absolute left-16 top-4 z-30 flex h-10 items-center overflow-hidden rounded-[14px] border border-white/[0.12] bg-[#1b1c21]/[0.88] px-3 shadow-[0_18px_48px_rgba(0,0,0,0.42),inset_0_1px_0_rgba(255,255,255,0.10)] backdrop-blur-2xl"
+      className="absolute left-16 top-4 z-30 flex h-10 max-w-[360px] items-center overflow-hidden rounded-[14px] border border-white/[0.12] bg-[#1b1c21]/[0.88] px-3 shadow-[0_18px_48px_rgba(0,0,0,0.42),inset_0_1px_0_rgba(255,255,255,0.10)] backdrop-blur-2xl"
       aria-label="Current project"
+      onDoubleClick={() => setEditing(true)}
     >
-      <div className="text-sm font-medium text-white/[0.92]">{title}</div>
+      {editing ? (
+        <input
+          ref={inputRef}
+          className="nodrag nopan h-7 min-w-0 bg-transparent text-sm font-medium text-white/[0.94] outline-none"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={save}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              save();
+            }
+            if (event.key === "Escape") {
+              event.preventDefault();
+              cancel();
+            }
+          }}
+        />
+      ) : (
+        <button
+          type="button"
+          className="min-w-0 truncate text-left text-sm font-medium text-white/[0.92] outline-none transition hover:text-white"
+          title="Rename project"
+          onClick={() => setEditing(true)}
+        >
+          {title}
+        </button>
+      )}
     </div>
   );
 }
@@ -457,6 +522,82 @@ function looseConnectionEdgeType(
 
 function nodeWidth(type: NodeType) {
   return type === "image_generation" ? 362 : 286;
+}
+
+type NodeBounds = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+function fallbackNodeSize(type?: string) {
+  if (type === "image_generation") {
+    return { width: 362, height: IMAGE_MODEL_HEIGHT };
+  }
+
+  if (type === "prompt") {
+    return { width: 360, height: 220 };
+  }
+
+  return { width: 286, height: 180 };
+}
+
+function measuredNodeSize(node: Node<NodeData>) {
+  const measured = node.measured;
+  const fallback = fallbackNodeSize(node.type);
+
+  return {
+    width: node.width ?? measured?.width ?? fallback.width,
+    height: node.height ?? measured?.height ?? fallback.height,
+  };
+}
+
+function nodeBounds(
+  node: Node<NodeData>,
+  position = node.position,
+): NodeBounds {
+  const size = measuredNodeSize(node);
+
+  return {
+    x: position.x,
+    y: position.y,
+    width: size.width,
+    height: size.height,
+  };
+}
+
+function overlapArea(a: NodeBounds, b: NodeBounds) {
+  const width = Math.max(
+    0,
+    Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x),
+  );
+  const height = Math.max(
+    0,
+    Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y),
+  );
+
+  return width * height;
+}
+
+function boundsContainPoint(bounds: NodeBounds, point: { x: number; y: number }) {
+  return (
+    point.x >= bounds.x &&
+    point.x <= bounds.x + bounds.width &&
+    point.y >= bounds.y &&
+    point.y <= bounds.y + bounds.height
+  );
+}
+
+function nodeAtPoint(
+  nodes: Node<NodeData>[],
+  point: { x: number; y: number },
+  excludedNodeId: string,
+) {
+  return nodes
+    .filter((node) => node.id !== excludedNodeId)
+    .filter((node) => boundsContainPoint(nodeBounds(node), point))
+    .sort((a, b) => (b.zIndex ?? 0) - (a.zIndex ?? 0))[0];
 }
 
 function pixelOffset(value: string) {
@@ -1069,6 +1210,7 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
   const selectNodes = useProjectStore((state) => state.selectNodes);
   const clearSelection = useProjectStore((state) => state.clearSelection);
   const createNode = useProjectStore((state) => state.createNode);
+  const renameProject = useProjectStore((state) => state.renameProject);
   const duplicateSelectedNodes = useProjectStore(
     (state) => state.duplicateSelectedNodes,
   );
@@ -1076,7 +1218,7 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
   const redo = useProjectStore((state) => state.redo);
   const canUndo = useProjectStore((state) => state.canUndo);
   const canRedo = useProjectStore((state) => state.canRedo);
-  const { screenToFlowPosition } = useReactFlow();
+  const { getNodes, screenToFlowPosition } = useReactFlow();
   const looseConnectionStartRef = useRef<LooseConnectionStart | null>(null);
   const connectionCompletedRef = useRef(false);
   const [zoom, setZoom] = useState(1);
@@ -1392,9 +1534,34 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
 
   const onNodeDragStop = useCallback(
     (_event: ReactMouseEvent, node: Node<NodeData>) => {
-      moveNode(node.id, snapCanvasPosition(node.position), "human");
+      const position = snapCanvasPosition(node.position);
+      moveNode(node.id, position, "human");
+
+      if (node.type !== "prompt" && node.type !== "image_generation") return;
+
+      const draggedBounds = nodeBounds(node, position);
+      const targetType = node.type === "prompt" ? "image_generation" : "prompt";
+      const target = getNodes()
+        .filter(
+          (candidate) =>
+            candidate.id !== node.id && candidate.type === targetType,
+        )
+        .map((candidate) => ({
+          node: candidate,
+          area: overlapArea(draggedBounds, nodeBounds(candidate)),
+        }))
+        .filter((candidate) => candidate.area > 0)
+        .sort((a, b) => b.area - a.area)[0]?.node;
+
+      if (!target) return;
+
+      if (node.type === "prompt") {
+        connectNodes(node.id, target.id, "input_to", "human");
+      } else {
+        connectNodes(target.id, node.id, "input_to", "human");
+      }
     },
-    [moveNode],
+    [connectNodes, getNodes, moveNode],
   );
 
   const onConnect = useCallback(
@@ -1457,13 +1624,38 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
       const startNode = project.nodes.find((node) => node.id === start.nodeId);
       if (!startNode) return;
 
+      const flowPoint = screenToFlowPosition(point);
+      const droppedNode = nodeAtPoint(getNodes(), flowPoint, start.nodeId);
+      const droppedStoreNode = droppedNode
+        ? project.nodes.find((node) => node.id === droppedNode.id)
+        : undefined;
+
+      if (droppedStoreNode) {
+        if (start.handleType === "target") {
+          connectNodes(
+            droppedStoreNode.id,
+            startNode.id,
+            inferEdgeType(droppedStoreNode, startNode),
+            "human",
+          );
+        } else {
+          connectNodes(
+            startNode.id,
+            droppedStoreNode.id,
+            inferEdgeType(startNode, droppedStoreNode),
+            "human",
+          );
+        }
+        return;
+      }
+
       const createdType = looseConnectionNodeType(start, startNode);
       const edgeType = looseConnectionEdgeType(start, startNode, createdType);
       const createdNode = createNode({
         type: createdType,
         createdBy: "human",
         position: looseConnectionPosition(
-          screenToFlowPosition(point),
+          flowPoint,
           start,
           createdType,
           edgeType,
@@ -1478,7 +1670,14 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
       }
       selectNode(createdNode.id, "human");
     },
-    [connectNodes, createNode, project.nodes, screenToFlowPosition, selectNode],
+    [
+      connectNodes,
+      createNode,
+      getNodes,
+      project.nodes,
+      screenToFlowPosition,
+      selectNode,
+    ],
   );
 
   const onNodesDelete = useCallback<OnNodesDelete>(
@@ -1575,7 +1774,7 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
         onUndo={undo}
         onRedo={redo}
       />
-      <ProjectHeader title={project.title} />
+      <ProjectHeader title={project.title} onRename={renameProject} />
       <NodeInspector nodes={selectedNodes} />
       {selectedNodes.length === 0 ||
       selectedNodes.every((node) => node.type === "prompt") ? (

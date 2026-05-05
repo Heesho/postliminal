@@ -109,16 +109,13 @@ function edgeTargetHandle(type: EdgeType) {
 }
 
 function dedupeConnectorEdges(edges: PostliminalEdge[]) {
-  const usedSources = new Set<string>();
   const usedTargets = new Set<string>();
   const deduped: PostliminalEdge[] = [];
 
   edges.forEach((edge) => {
-    const sourceKey = `${edge.source}:${edgeSourceHandle(edge.type)}`;
     const targetKey = `${edge.target}:${edgeTargetHandle(edge.type)}`;
-    if (usedSources.has(sourceKey) || usedTargets.has(targetKey)) return;
+    if (usedTargets.has(targetKey)) return;
 
-    usedSources.add(sourceKey);
     usedTargets.add(targetKey);
     deduped.push(edge);
   });
@@ -243,6 +240,7 @@ type ProjectStore = {
   canRedo: boolean;
   hydrateProject: () => void;
   createProject: (title: string) => ProjectState;
+  renameProject: (title: string) => void;
   switchProject: (projectId: string) => void;
   undo: () => void;
   redo: () => void;
@@ -404,6 +402,19 @@ export const useProjectStore = create<ProjectStore>()((set, get) => {
         canRedo: false,
       });
       return project;
+    },
+
+    renameProject: (title) => {
+      const nextTitle = title.trim() || "Untitled project";
+      const project = get().project;
+      if (project.title === nextTitle) return;
+
+      commit(
+        { ...project, title: nextTitle },
+        "rename_project",
+        "human",
+        { title: nextTitle },
+      );
     },
 
     switchProject: (projectId) => {
@@ -633,14 +644,15 @@ export const useProjectStore = create<ProjectStore>()((set, get) => {
       const sourceHandle = edgeSourceHandle(type);
       const targetHandle = edgeTargetHandle(type);
       const edges = project.edges.filter((existingEdge) => {
-        const conflictsWithSource =
-          existingEdge.source === sourceId &&
-          edgeSourceHandle(existingEdge.type) === sourceHandle;
         const conflictsWithTarget =
           existingEdge.target === targetId &&
           edgeTargetHandle(existingEdge.type) === targetHandle;
+        const conflictsWithImageSource =
+          sourceHandle === "image-out" &&
+          existingEdge.source === sourceId &&
+          edgeSourceHandle(existingEdge.type) === sourceHandle;
 
-        return !conflictsWithSource && !conflictsWithTarget;
+        return !conflictsWithImageSource && !conflictsWithTarget;
       });
 
       commit(
