@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { mkdir, writeFile } from "fs/promises";
+import { mkdir, readFile, readdir, stat, writeFile } from "fs/promises";
 import path from "path";
 import {
   DEFAULT_OPENAI_IMAGE_API_MODEL,
@@ -35,6 +35,7 @@ const supportedSizes = new Set(["1024x1024", "1536x1024", "1024x1536"]);
 const supportedQualities = new Set(["low", "medium", "high", "auto"]);
 const OPENAI_IMAGE_TIMEOUT_MS = 120000;
 const PROJECT_ASSETS_DIR = path.join(process.cwd(), "projects");
+const RECOVERY_CLOCK_SKEW_MS = 5000;
 
 function stringValue(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -64,7 +65,12 @@ function normalizeImageUrls(value: unknown) {
 
   return value
     .map((item) => stringValue(item))
-    .filter((item) => item.startsWith("data:image/") || item.startsWith("http"))
+    .filter(
+      (item) =>
+        item.startsWith("data:image/") ||
+        item.startsWith("http") ||
+        item.startsWith("/api/project-assets/"),
+    )
     .slice(0, 8);
 }
 
@@ -82,6 +88,43 @@ function extensionForMime(mimeType: string) {
   if (mimeType.includes("jpeg") || mimeType.includes("jpg")) return "jpg";
   if (mimeType.includes("webp")) return "webp";
   return "png";
+}
+
+function mimeTypeForFileName(fileName: string) {
+  if (/\.jpe?g$/i.test(fileName)) return "image/jpeg";
+  if (/\.webp$/i.test(fileName)) return "image/webp";
+  return "image/png";
+}
+
+async function projectAssetDataUrl(imageUrl: string) {
+  const assetPath = decodeURIComponent(
+    imageUrl.slice("/api/project-assets/".length),
+  );
+  const segments = assetPath.split("/").filter(Boolean);
+  if (
+    segments.length === 0 ||
+    segments.some((segment) => segment === ".." || segment.includes("\0"))
+  ) {
+    throw new Error("Invalid local project asset URL");
+  }
+
+  const projectAssetsRoot = path.resolve(PROJECT_ASSETS_DIR);
+  const filePath = path.resolve(PROJECT_ASSETS_DIR, ...segments);
+  if (!filePath.startsWith(`${projectAssetsRoot}${path.sep}`)) {
+    throw new Error("Invalid local project asset URL");
+  }
+
+  const buffer = await readFile(filePath);
+  const mimeType = mimeTypeForFileName(filePath);
+  return `data:${mimeType};base64,${buffer.toString("base64")}`;
+}
+
+async function openAiImageUrl(imageUrl: string) {
+  if (imageUrl.startsWith("/api/project-assets/")) {
+    return await projectAssetDataUrl(imageUrl);
+  }
+
+  return imageUrl;
 }
 
 async function imageBufferFromUrl(imageUrl: string) {
@@ -137,6 +180,52 @@ async function saveGeneratedImages({
       };
     }),
   );
+}
+
+async function listGeneratedImagesSince({
+  projectId,
+  generationNodeId,
+  since,
+}: {
+  projectId: string;
+  generationNodeId: string;
+  since: number;
+}) {
+  const assetDir = path.join(
+    PROJECT_ASSETS_DIR,
+    projectId,
+    "images",
+    generationNodeId,
+  );
+
+  let entries;
+  try {
+    entries = await readdir(assetDir, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+
+  const images = await Promise.all(
+    entries
+      .filter((entry) => entry.isFile())
+      .filter((entry) => /\.(png|jpe?g|webp)$/i.test(entry.name))
+      .map(async (entry) => {
+        const filePath = path.join(assetDir, entry.name);
+        const fileStat = await stat(filePath);
+
+        return {
+          name: entry.name,
+          mtimeMs: fileStat.mtimeMs,
+          url: `/api/project-assets/${projectId}/images/${generationNodeId}/${entry.name}`,
+        };
+      }),
+  );
+
+  return images
+    .filter((image) => image.mtimeMs >= since - RECOVERY_CLOCK_SKEW_MS)
+    .sort((a, b) => a.mtimeMs - b.mtimeMs || a.name.localeCompare(b.name))
+    .map((image) => image.url);
 }
 
 async function callOpenAIImages({
@@ -249,7 +338,9 @@ export async function POST(request: Request) {
   const quality = normalizeQuality(body.quality);
   const size = normalizeSize(body.resolution);
   const runs = clampRuns(body.runs);
-  const imageUrls = normalizeImageUrls(body.imageUrls);
+  const imageUrls = await Promise.all(
+    normalizeImageUrls(body.imageUrls).map(openAiImageUrl),
+  );
   const projectId = safePathSegment(body.projectId, "untitled-project");
   const generationNodeId = safePathSegment(
     body.generationNodeId,
@@ -297,4 +388,24 @@ export async function POST(request: Request) {
   }
 
   return NextResponse.json({ error: lastError }, { status: 502 });
+}
+
+export async function GET(request: Request) {
+  const url = new URL(request.url);
+  const projectId = safePathSegment(
+    url.searchParams.get("projectId"),
+    "untitled-project",
+  );
+  const generationNodeId = safePathSegment(
+    url.searchParams.get("generationNodeId"),
+    "image-generation",
+  );
+  const since = Number(url.searchParams.get("since") ?? 0);
+  const images = await listGeneratedImagesSince({
+    projectId,
+    generationNodeId,
+    since: Number.isFinite(since) ? since : 0,
+  });
+
+  return NextResponse.json({ images });
 }

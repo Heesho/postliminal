@@ -100,23 +100,27 @@ function edgeTone(type: EdgeType) {
   return promptEdges.includes(type) ? "prompt" : "image";
 }
 
-function edgeSourceHandle(type: EdgeType) {
-  return edgeTone(type) === "prompt" ? "prompt-out" : "image-out";
-}
-
 function edgeTargetHandle(type: EdgeType) {
   return edgeTone(type) === "prompt" ? "prompt-in" : "image-in";
 }
 
 function dedupeConnectorEdges(edges: PostliminalEdge[]) {
-  const usedTargets = new Set<string>();
+  const usedEdges = new Set<string>();
+  const usedSingleInputTargets = new Set<string>();
   const deduped: PostliminalEdge[] = [];
 
   edges.forEach((edge) => {
-    const targetKey = `${edge.target}:${edgeTargetHandle(edge.type)}`;
-    if (usedTargets.has(targetKey)) return;
+    const edgeKey = `${edge.source}:${edge.target}:${edge.type}`;
+    if (usedEdges.has(edgeKey)) return;
+    usedEdges.add(edgeKey);
 
-    usedTargets.add(targetKey);
+    const targetHandle = edgeTargetHandle(edge.type);
+    const targetKey = `${edge.target}:${targetHandle}`;
+    if (targetHandle !== "image-in") {
+      if (usedSingleInputTargets.has(targetKey)) return;
+      usedSingleInputTargets.add(targetKey);
+    }
+
     deduped.push(edge);
   });
 
@@ -641,18 +645,15 @@ export const useProjectStore = create<ProjectStore>()((set, get) => {
         createdBy,
         createdAt: now(),
       };
-      const sourceHandle = edgeSourceHandle(type);
       const targetHandle = edgeTargetHandle(type);
       const edges = project.edges.filter((existingEdge) => {
+        if (targetHandle === "image-in") return true;
+
         const conflictsWithTarget =
           existingEdge.target === targetId &&
           edgeTargetHandle(existingEdge.type) === targetHandle;
-        const conflictsWithImageSource =
-          sourceHandle === "image-out" &&
-          existingEdge.source === sourceId &&
-          edgeSourceHandle(existingEdge.type) === sourceHandle;
 
-        return !conflictsWithImageSource && !conflictsWithTarget;
+        return !conflictsWithTarget;
       });
 
       commit(
@@ -1050,6 +1051,7 @@ export const useProjectStore = create<ProjectStore>()((set, get) => {
             status: "completed",
             generatedImageCount: nextImageUrls.length,
             generatedImageUrls: nextImageUrls,
+            activeGeneratedImageIndex: nextImageUrls.length - 1,
             generatedImageMetadata: {
               sourceModel: sourceModel.label,
               ...metadata,

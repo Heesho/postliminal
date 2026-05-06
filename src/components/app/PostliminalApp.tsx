@@ -6,19 +6,27 @@ import { runCanvasAgentCommand } from "@/agent/canvasAgent";
 import { PostliminalCanvas } from "@/components/canvas/PostliminalCanvas";
 import {
   appendPostLiminalLogoPrompts,
+  appendSelectedLogoYellowBranch,
   createPostLiminalLogoSession,
 } from "@/lib/logoSession";
+import {
+  listSavedGeneratedImages,
+  waitForSavedGeneratedImages,
+} from "@/lib/imageGenerationClient";
 import { useProjectStore } from "@/store/projectStore";
 import type { NodeData } from "@/types/project";
 
 const LOGO_SESSION_VERSION = "v10";
 const LOGO_SESSION_STORAGE_KEY = "postliminal.logoSession.loadedVersion";
-const LOGO_PROMPT_EXPANSION_VERSION = "v6";
+const LOGO_PROMPT_EXPANSION_VERSION = "v11";
 const LOGO_PROMPT_EXPANSION_STORAGE_KEY =
   "postliminal.logoSession.promptExpansionVersion";
 const IMAGE_QUALITY_DEFAULT_VERSION = "v1";
 const IMAGE_QUALITY_DEFAULT_STORAGE_KEY =
   "postliminal.imageGeneration.defaultQualityVersion";
+const LOGO_YELLOW_BRANCH_VERSION = "v3";
+const LOGO_YELLOW_BRANCH_STORAGE_KEY =
+  "postliminal.logoSession.yellowBranchVersion";
 
 declare global {
   interface Window {
@@ -28,6 +36,26 @@ declare global {
       resetProject: () => void;
     };
   }
+}
+
+function imageUrlsFromData(data: NodeData) {
+  return Array.isArray(data.generatedImageUrls)
+    ? data.generatedImageUrls.filter(
+        (imageUrl): imageUrl is string => typeof imageUrl === "string",
+      )
+    : [];
+}
+
+function isInlineImageUrl(imageUrl: string) {
+  return imageUrl.startsWith("data:image/");
+}
+
+function isLogoLabProject(project: { projectId: string; title: string }) {
+  return (
+    project.projectId === "postliminal" ||
+    project.title === "PostLiminal Logo Lab" ||
+    project.title === "Logo Lab"
+  );
 }
 
 function ProjectSelectionPage({ onOpenCanvas }: { onOpenCanvas: () => void }) {
@@ -106,11 +134,14 @@ export function PostliminalApp() {
   const project = useProjectStore((state) => state.project);
   const loadProject = useProjectStore((state) => state.loadProject);
   const updateNode = useProjectStore((state) => state.updateNode);
+  const createImageOutputs = useProjectStore((state) => state.createImageOutputs);
   const exportProject = useProjectStore((state) => state.exportProject);
   const resetProject = useProjectStore((state) => state.resetProject);
   const logoSessionVersion = LOGO_SESSION_VERSION;
   const logoPromptExpansionVersion = LOGO_PROMPT_EXPANSION_VERSION;
-  const staleRunsClearedRef = useRef(false);
+  const logoYellowBranchVersion = LOGO_YELLOW_BRANCH_VERSION;
+  const staleRunsRecoveredProjectIdsRef = useRef(new Set<string>());
+  const savedImageSyncChecksRef = useRef(new Set<string>());
   const staleOutputsCleanedProjectRef = useRef("");
   const [view, setView] = useState<"canvas" | "projects">("canvas");
 
@@ -129,27 +160,219 @@ export function PostliminalApp() {
   }, [hasHydrated, loadProject, logoSessionVersion, project.projectId]);
 
   useEffect(() => {
-    if (!hasHydrated || staleRunsClearedRef.current) return;
-    staleRunsClearedRef.current = true;
+    if (!hasHydrated) return;
+    if (staleRunsRecoveredProjectIdsRef.current.has(project.projectId)) return;
+    staleRunsRecoveredProjectIdsRef.current.add(project.projectId);
 
     project.nodes
       .filter(
         (node) =>
-          node.type === "image_generation" && node.data.status === "running",
+          node.type === "image_generation" &&
+          (node.data.status === "running" ||
+            node.data.status === "queued" ||
+            node.data.lastRunError === "Failed to fetch"),
       )
       .forEach((node) => {
+        if (node.data.status === "queued") {
+          updateNode(
+            node.id,
+            {
+              data: {
+                status: "error",
+                runMessage: "",
+                runStartedAt: undefined,
+                lastRunError:
+                  "Generation was queued before a refresh. Run it again.",
+              },
+            },
+            "human",
+          );
+          return;
+        }
+
+        const runStartedAt =
+          typeof node.data.runStartedAt === "number" &&
+          Number.isFinite(node.data.runStartedAt)
+            ? node.data.runStartedAt
+            : 0;
+
+        if (!runStartedAt) {
+          updateNode(
+            node.id,
+            {
+              data: {
+                status: "error",
+                runMessage: "",
+                runStartedAt: undefined,
+                lastRunError:
+                  "Generation was interrupted by a refresh. Run it again.",
+              },
+            },
+            "human",
+          );
+          return;
+        }
+
         updateNode(
           node.id,
           {
             data: {
-              status: "error",
-              lastRunError: "Previous image generation did not finish.",
+              runMessage: "Restoring interrupted generation...",
+              lastRunError: "",
             },
           },
           "human",
         );
+
+        void waitForSavedGeneratedImages({
+          projectId: project.projectId,
+          generationNodeId: node.id,
+          since: runStartedAt,
+        })
+          .then((images) => {
+            if (images.length > 0) {
+              createImageOutputs(node.id, images, "human", {
+                apiSize:
+                  typeof node.data.resolution === "string"
+                    ? node.data.resolution
+                    : undefined,
+              });
+              updateNode(
+                node.id,
+                {
+                  data: {
+                    lastRunError: "",
+                    runMessage: "",
+                    runStartedAt: undefined,
+                  },
+                },
+                "human",
+              );
+              return;
+            }
+
+            updateNode(
+              node.id,
+              {
+                data: {
+                  status: "error",
+                  runMessage: "",
+                  runStartedAt: undefined,
+                  lastRunError:
+                    "Generation was interrupted before an image was saved. Run it again.",
+                },
+              },
+              "human",
+            );
+          })
+          .catch((error) => {
+            updateNode(
+              node.id,
+              {
+                data: {
+                  status: "error",
+                  runMessage: "",
+                  runStartedAt: undefined,
+                  lastRunError:
+                    error instanceof Error
+                      ? error.message
+                      : "Generation recovery failed.",
+                },
+              },
+              "human",
+            );
+          });
       });
-  }, [hasHydrated, project.nodes, updateNode]);
+  }, [createImageOutputs, hasHydrated, project, updateNode]);
+
+  useEffect(() => {
+    if (!hasHydrated) return;
+
+    project.nodes
+      .filter((node) => node.type === "image_generation")
+      .forEach((node) => {
+        const currentImageUrls = imageUrlsFromData(node.data);
+        const generatedImageCount =
+          typeof node.data.generatedImageCount === "number" &&
+          Number.isFinite(node.data.generatedImageCount)
+            ? node.data.generatedImageCount
+            : 0;
+        const hasInlineImageUrls = currentImageUrls.some(isInlineImageUrl);
+        const shouldRepairMissingUrls =
+          node.data.status !== "running" &&
+          currentImageUrls.length === 0 &&
+          (generatedImageCount > 0 ||
+            node.data.status === "completed" ||
+            node.data.lastRunError === "Failed to fetch");
+        const shouldReplaceInlineUrls =
+          node.data.status !== "running" &&
+          currentImageUrls.length > 0 &&
+          hasInlineImageUrls;
+
+        if (!shouldRepairMissingUrls && !shouldReplaceInlineUrls) return;
+
+        const checkKey = `${project.projectId}:${node.id}:${node.updatedAt}`;
+        if (savedImageSyncChecksRef.current.has(checkKey)) return;
+        savedImageSyncChecksRef.current.add(checkKey);
+
+        void listSavedGeneratedImages({
+          projectId: project.projectId,
+          generationNodeId: node.id,
+        })
+          .then((savedImageUrls) => {
+            const desiredCount = Math.max(
+              1,
+              Math.min(24, generatedImageCount || currentImageUrls.length || 1),
+            );
+            const recoveredImageUrls = savedImageUrls.slice(-desiredCount);
+
+            if (shouldReplaceInlineUrls && recoveredImageUrls.length > 0) {
+              updateNode(
+                node.id,
+                {
+                  data: {
+                    status:
+                      node.data.status === "error"
+                        ? "completed"
+                        : node.data.status,
+                    generatedImageCount: recoveredImageUrls.length,
+                    generatedImageUrls: recoveredImageUrls,
+                    lastRunError: "",
+                    runMessage: "",
+                    runStartedAt: undefined,
+                  },
+                },
+                "human",
+              );
+              return;
+            }
+
+            const missingImageUrls = recoveredImageUrls.filter(
+              (imageUrl) => !currentImageUrls.includes(imageUrl),
+            );
+            if (missingImageUrls.length === 0) return;
+
+            createImageOutputs(node.id, missingImageUrls, "human", {
+              apiSize:
+                typeof node.data.resolution === "string"
+                  ? node.data.resolution
+                  : undefined,
+            });
+            updateNode(
+              node.id,
+              {
+                data: {
+                  lastRunError: "",
+                  runMessage: "",
+                  runStartedAt: undefined,
+                },
+              },
+              "human",
+            );
+          })
+          .catch(() => undefined);
+      });
+  }, [createImageOutputs, hasHydrated, project.nodes, project.projectId, updateNode]);
 
   useEffect(() => {
     if (!hasHydrated) return;
@@ -161,11 +384,7 @@ export function PostliminalApp() {
     const nodes = project.nodes.map((node) => {
       if (node.type !== "image_generation") return node;
 
-      const generatedImageUrls = Array.isArray(node.data.generatedImageUrls)
-        ? node.data.generatedImageUrls.filter(
-            (imageUrl): imageUrl is string => typeof imageUrl === "string",
-          )
-        : [];
+      const generatedImageUrls = imageUrlsFromData(node.data);
       const generatedImageCount =
         typeof node.data.generatedImageCount === "number" &&
         Number.isFinite(node.data.generatedImageCount)
@@ -231,7 +450,7 @@ export function PostliminalApp() {
 
   useEffect(() => {
     if (!hasHydrated) return;
-    if (project.title !== "PostLiminal Logo Lab") return;
+    if (!isLogoLabProject(project)) return;
 
     const loadedVersion = window.localStorage.getItem(
       LOGO_PROMPT_EXPANSION_STORAGE_KEY,
@@ -248,6 +467,36 @@ export function PostliminalApp() {
       loadProject(expandedProject);
     }
   }, [hasHydrated, loadProject, logoPromptExpansionVersion, project]);
+
+  useEffect(() => {
+    if (!hasHydrated) return;
+    if (!isLogoLabProject(project)) return;
+
+    const hasSelectedGeneratedLogo = project.selectedNodeIds.some((nodeId) => {
+      const node = project.nodes.find((projectNode) => projectNode.id === nodeId);
+      return (
+        node?.type === "image_generation" &&
+        imageUrlsFromData(node.data).length > 0
+      );
+    });
+    const hasFallbackLogo = project.nodes.some(
+      (node) =>
+        node.id === "image_generation_postliminal_logo_23" &&
+        node.type === "image_generation",
+    );
+    if (!hasSelectedGeneratedLogo && !hasFallbackLogo) return;
+
+    const storageKey = `${LOGO_YELLOW_BRANCH_STORAGE_KEY}.${project.projectId}`;
+    if (window.localStorage.getItem(storageKey) === logoYellowBranchVersion) {
+      return;
+    }
+
+    const branchedProject = appendSelectedLogoYellowBranch(project);
+    if (branchedProject !== project) {
+      window.localStorage.setItem(storageKey, logoYellowBranchVersion);
+      loadProject(branchedProject);
+    }
+  }, [hasHydrated, loadProject, logoYellowBranchVersion, project]);
 
   useEffect(() => {
     window.postliminal = {

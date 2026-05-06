@@ -26,6 +26,28 @@ const promptNodeChromeHeight = CARD_HEADER_HEIGHT;
 const promptGridSize = 20;
 const promptTextMinHeight = 84;
 const promptTextMaxHeight = IMAGE_MODEL_HEIGHT - promptNodeChromeHeight;
+const defaultPromptPlaceholder =
+  "Describe the frame, motion, materials, light, and constraints.";
+const branchPromptPlaceholder = "Describe the next image direction.";
+
+function legacyPlaceholderForText(value: string) {
+  const trimmedValue = value.trim();
+  if (!trimmedValue) return "";
+  if (trimmedValue === defaultPromptPlaceholder) return defaultPromptPlaceholder;
+  if (trimmedValue === branchPromptPlaceholder) return branchPromptPlaceholder;
+  if (/^Describe the next image direct[a-z\s.]*$/i.test(trimmedValue)) {
+    return branchPromptPlaceholder;
+  }
+  if (
+    /^Describe the fr[a-z\s]*,\s*motion,\s*materials,\s*light,\s*and constraints\.$/i.test(
+      trimmedValue,
+    )
+  ) {
+    return defaultPromptPlaceholder;
+  }
+
+  return "";
+}
 
 function snapPromptHeight(contentHeight: number) {
   const clampedHeight = Math.max(
@@ -44,7 +66,14 @@ function snapPromptHeight(contentHeight: number) {
 
 export function PromptNode({ id, data, selected }: NodeProps<FlowNode>) {
   const updateNode = useProjectStore((state) => state.updateNode);
-  const text = String(data.text ?? "");
+  const storedText = String(data.text ?? "");
+  const storedPlaceholder =
+    typeof data.placeholder === "string" ? data.placeholder : "";
+  const legacyPlaceholder = storedPlaceholder
+    ? ""
+    : legacyPlaceholderForText(storedText);
+  const text = legacyPlaceholder ? "" : storedText;
+  const placeholder = storedPlaceholder || legacyPlaceholder || defaultPromptPlaceholder;
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const [draft, setDraft] = useState(text);
   const [textareaHeight, setTextareaHeight] = useState(promptTextMinHeight);
@@ -137,12 +166,12 @@ export function PromptNode({ id, data, selected }: NodeProps<FlowNode>) {
       >
         <textarea
           ref={textareaRef}
-          className={`block w-full resize-none rounded-b-[18px] rounded-t-none border-0 bg-[#17181d] px-5 py-4 text-[13px] font-normal leading-[1.55] text-white/[0.76] outline-none shadow-none transition focus:bg-[#1b1c22] ${
+          className={`block w-full resize-none rounded-b-[18px] rounded-t-none border-0 bg-[#17181d] px-5 py-4 text-[13px] font-normal leading-[1.55] text-white/[0.76] outline-none shadow-none transition placeholder:text-white/[0.38] focus:bg-[#1b1c22] ${
             selected ? "overflow-y-auto overscroll-contain" : "overflow-y-hidden"
           }`}
           style={{ height: isAtMaxHeight ? "100%" : textareaHeight }}
           value={draft}
-          placeholder="Prompt text"
+          placeholder={placeholder}
           spellCheck={false}
           onChange={(event) => setDraft(event.target.value)}
           onBlur={saveDraft}

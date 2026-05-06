@@ -5,6 +5,10 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "PostLiminal",
   description: "Agent-native generative canvas prototype",
+  icons: {
+    icon: "/brand/postliminal-logo.png",
+    apple: "/brand/postliminal-logo.png",
+  },
 };
 
 export default function RootLayout({

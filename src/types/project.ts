@@ -3,6 +3,7 @@ export type NodeType =
   | "prompt"
   | "image_reference"
   | "image_generation"
+  | "background_removal"
   | "image_output"
   | "selection_group"
   | "group";
@@ -18,7 +19,13 @@ export type EdgeType =
 
 export type Actor = "human" | "agent";
 
-export type NodeStatus = "idle" | "ready" | "running" | "completed" | "error";
+export type NodeStatus =
+  | "idle"
+  | "ready"
+  | "queued"
+  | "running"
+  | "completed"
+  | "error";
 
 export type Position = {
   x: number;

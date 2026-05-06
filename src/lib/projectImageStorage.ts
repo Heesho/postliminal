@@ -37,6 +37,10 @@ function hasInlineImageUrls(imageUrls: string[]) {
   return imageUrls.some((imageUrl) => imageUrl.startsWith("data:image/"));
 }
 
+function storesGeneratedImages(nodeType: string) {
+  return nodeType === "image_generation" || nodeType === "background_removal";
+}
+
 function imageStorageKey(projectId: string, nodeId: string, index: number) {
   return `${projectId}:${nodeId}:${index}`;
 }
@@ -84,7 +88,7 @@ export function projectWithoutInlineGeneratedImages(
   return {
     ...project,
     nodes: project.nodes.map((node) => {
-      if (node.type !== "image_generation") return node;
+      if (!storesGeneratedImages(node.type)) return node;
 
       const imageUrls = generatedImageUrls(node.data);
       if (!hasInlineImageUrls(imageUrls)) return node;
@@ -119,7 +123,7 @@ export function projectWithoutInlineGeneratedImages(
 
 export async function saveProjectGeneratedImages(project: ProjectState) {
   const records = project.nodes.flatMap((node) => {
-    if (node.type !== "image_generation") return [];
+    if (!storesGeneratedImages(node.type)) return [];
 
     return generatedImageUrls(node.data).map((imageUrl, index) => ({
       key: imageStorageKey(project.projectId, node.id, index),
@@ -154,7 +158,7 @@ export async function saveProjectGeneratedImages(project: ProjectState) {
 export async function hydrateProjectGeneratedImages(project: ProjectState) {
   const nodesWithRefs = project.nodes.filter(
     (node) =>
-      node.type === "image_generation" && generatedImageRefs(node.data).length > 0,
+      storesGeneratedImages(node.type) && generatedImageRefs(node.data).length > 0,
   );
 
   if (nodesWithRefs.length === 0 || !canUseIndexedDb()) return project;
@@ -164,7 +168,7 @@ export async function hydrateProjectGeneratedImages(project: ProjectState) {
 
   const nodes = await Promise.all(
     project.nodes.map(async (node) => {
-      if (node.type !== "image_generation") return node;
+      if (!storesGeneratedImages(node.type)) return node;
 
       const refs = generatedImageRefs(node.data);
       if (refs.length === 0) return node;

@@ -17,8 +17,13 @@ function isSafeSegment(segment: string) {
   return /^[a-zA-Z0-9_.-]+$/.test(segment) && segment !== "..";
 }
 
+function safeDownloadName(value: string | null) {
+  if (!value) return "";
+  return value.replace(/[^a-zA-Z0-9_.-]+/g, "-").replace(/^-|-$/g, "");
+}
+
 export async function GET(
-  _request: Request,
+  request: Request,
   context: { params: Promise<{ assetPath?: string[] }> },
 ) {
   const { assetPath = [] } = await context.params;
@@ -34,11 +39,20 @@ export async function GET(
 
   try {
     const file = await readFile(filePath);
+    const downloadName = safeDownloadName(
+      new URL(request.url).searchParams.get("download"),
+    );
+    const headers = new Headers({
+      "Content-Type": contentTypeForPath(filePath),
+      "Cache-Control": "no-store",
+    });
+
+    if (downloadName) {
+      headers.set("Content-Disposition", `attachment; filename="${downloadName}"`);
+    }
+
     return new Response(new Uint8Array(file), {
-      headers: {
-        "Content-Type": contentTypeForPath(filePath),
-        "Cache-Control": "no-store",
-      },
+      headers,
     });
   } catch {
     return NextResponse.json({ error: "Asset not found." }, { status: 404 });

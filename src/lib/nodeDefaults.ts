@@ -21,7 +21,8 @@ export function defaultNodeData(type: NodeType, index = 0): NodeData {
     case "prompt":
       return {
         title: "Prompt",
-        text: "Describe the frame, motion, materials, light, and constraints.",
+        text: "",
+        placeholder: "Describe the frame, motion, materials, light, and constraints.",
         status: "ready",
       };
     case "image_generation":
@@ -30,6 +31,11 @@ export function defaultNodeData(type: NodeType, index = 0): NodeData {
         model: DEFAULT_IMAGE_MODEL_ID,
         modelLabel: getImageModelOption(DEFAULT_IMAGE_MODEL_ID).nodeLabel,
         quality: "medium",
+        status: "idle",
+      };
+    case "background_removal":
+      return {
+        title: "Remove Background",
         status: "idle",
       };
     case "image_output":

@@ -81,6 +81,7 @@ type HandleOffset = "center" | "prompt" | "image";
 export const PROMPT_HANDLE_TOP = "32px";
 export const IMAGE_HANDLE_TOP = "52px";
 export const CARD_HEADER_HEIGHT = 76;
+export const IMAGE_MODEL_WIDTH = 362;
 export const IMAGE_MODEL_HEIGHT = 420;
 
 function handleColor(tone: HandleTone) {

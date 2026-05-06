@@ -21,6 +21,7 @@ import {
   getBezierPath,
   useReactFlow,
   type Connection,
+  type ConnectionLineComponentProps,
   type Edge,
   type EdgeProps,
   type Node,
@@ -33,12 +34,12 @@ import {
 } from "@xyflow/react";
 import {
   ArrowRight,
-  Asterisk,
   Check,
   ChevronDown,
   ChevronRight,
   Circle,
   Cpu,
+  Eraser,
   Image as ImageIcon,
   Info,
   Minus,
@@ -56,6 +57,8 @@ import {
   generateChatGptImages,
   resolveImageGenerationInputs,
 } from "@/lib/imageGenerationClient";
+import { imageGenerationProgressPercent } from "@/lib/imageGenerationProgress";
+import { removeImageBackground } from "@/lib/backgroundRemovalClient";
 import {
   CANVAS_GRID_GAP,
   CANVAS_SNAP_GRID,
@@ -85,6 +88,7 @@ import type {
   NodeType,
   PostliminalNode,
 } from "@/types/project";
+import { BackgroundRemovalNode } from "./nodes/BackgroundRemovalNode";
 import { BriefNode } from "./nodes/BriefNode";
 import { GroupNode } from "./nodes/GroupNode";
 import { ImageGenerationNode } from "./nodes/ImageGenerationNode";
@@ -92,6 +96,7 @@ import { ImageOutputNode } from "./nodes/ImageOutputNode";
 import {
   IMAGE_HANDLE_TOP,
   IMAGE_MODEL_HEIGHT,
+  IMAGE_MODEL_WIDTH,
   PROMPT_HANDLE_TOP,
 } from "./nodes/NodePrimitives";
 import { PromptNode } from "./nodes/PromptNode";
@@ -100,11 +105,16 @@ const nodeTypes = {
   brief: BriefNode,
   prompt: PromptNode,
   image_generation: ImageGenerationNode,
+  background_removal: BackgroundRemovalNode,
   image_output: ImageOutputNode,
   group: GroupNode,
   image_reference: ImageOutputNode,
   selection_group: GroupNode,
 };
+const IMAGE_GENERATION_BATCH_CONCURRENCY = 2;
+const BACKGROUND_REMOVAL_BATCH_CONCURRENCY = 2;
+const FLOATING_GLASS_CLASS =
+  "border border-white/[0.10] bg-white/[0.075] shadow-[0_24px_80px_rgba(0,0,0,0.48),inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-2xl";
 
 function LiminalEdge(props: EdgeProps) {
   const [edgePath] = getBezierPath({
@@ -156,6 +166,11 @@ const menuItems: Array<{
     label: "Import image",
     icon: <ImageIcon className="h-4 w-4" />,
   },
+  {
+    type: "background_removal",
+    label: "Remove background",
+    icon: <Eraser className="h-4 w-4" />,
+  },
 ];
 
 function inferEdgeType(
@@ -169,6 +184,20 @@ function inferEdgeType(
   }
   if (source.type === "image_generation" && target.type === "image_output") {
     return "generated";
+  }
+  if (source.type === "background_removal" && target.type === "image_output") {
+    return "generated";
+  }
+  if (
+    (
+      source.type === "image_generation" ||
+      source.type === "background_removal" ||
+      source.type === "image_output" ||
+      source.type === "image_reference"
+    ) &&
+    (target.type === "image_generation" || target.type === "background_removal")
+  ) {
+    return "variation_of";
   }
   if (source.type === "image_output" && target.type === "prompt") {
     return "refined_from";
@@ -207,8 +236,90 @@ function handleColor(handleId?: string | null) {
   return handleTone(handleId) === "prompt" ? "#f5b950" : "#6aa6ff";
 }
 
-function AppSidebar({
-  onOpenProjects,
+function BatchConnectionLine(props: ConnectionLineComponentProps<Node<NodeData>>) {
+  const project = useProjectStore((state) => state.project);
+  const fromNode = project.nodes.find((node) => node.id === props.fromNode.id);
+  const fromHandleId = props.fromHandle.id;
+  const selectedSameTypeNodes =
+    fromNode && project.selectedNodeIds.includes(fromNode.id)
+      ? project.selectedNodeIds
+          .map((nodeId) => project.nodes.find((node) => node.id === nodeId))
+          .filter(
+            (node): node is PostliminalNode =>
+              node !== undefined && node.type === fromNode.type,
+          )
+      : [];
+  const previewNodes = selectedSameTypeNodes.length > 1
+    ? selectedSameTypeNodes
+    : fromNode
+      ? [fromNode]
+      : [];
+  const fallbackPath = getBezierPath({
+    sourceX: props.fromX,
+    sourceY: props.fromY,
+    sourcePosition: props.fromPosition,
+    targetX: props.toX,
+    targetY: props.toY,
+    targetPosition: props.toPosition,
+    curvature: 0.34,
+  })[0];
+  const handleTop =
+    handleTone(fromHandleId) === "prompt"
+      ? pixelOffset(PROMPT_HANDLE_TOP)
+      : pixelOffset(IMAGE_HANDLE_TOP);
+  const isSourceHandle = props.fromHandle.type === "source";
+  const color = handleColor(fromHandleId);
+
+  return (
+    <g className="react-flow__connection">
+      {previewNodes.length > 0
+        ? previewNodes.map((node) => {
+            const size = fallbackNodeSize(node.type);
+            const sourceX = isSourceHandle
+              ? node.position.x + size.width
+              : node.position.x;
+            const sourceY = node.position.y + handleTop;
+            const [path] = getBezierPath({
+              sourceX,
+              sourceY,
+              sourcePosition: props.fromPosition,
+              targetX: props.toX,
+              targetY: props.toY,
+              targetPosition: props.toPosition,
+              curvature: 0.34,
+            });
+
+            return (
+              <path
+                key={node.id}
+                d={path}
+                fill="none"
+                stroke={color}
+                strokeWidth={1.35}
+                strokeLinecap="round"
+                strokeOpacity={node.id === props.fromNode.id ? 0.95 : 0.58}
+                style={{
+                  ...props.connectionLineStyle,
+                  filter: `drop-shadow(0 0 7px ${color}24)`,
+                }}
+              />
+            );
+          })
+        : (
+          <path
+            d={fallbackPath}
+            fill="none"
+            stroke={color}
+            strokeWidth={1.35}
+            strokeLinecap="round"
+            style={props.connectionLineStyle}
+          />
+        )}
+    </g>
+  );
+}
+
+function CanvasControls({
   onOpenSettings,
   zoom,
   canUndo,
@@ -216,7 +327,6 @@ function AppSidebar({
   onUndo,
   onRedo,
 }: {
-  onOpenProjects: () => void;
   onOpenSettings: () => void;
   zoom: number;
   canUndo: boolean;
@@ -224,60 +334,47 @@ function AppSidebar({
   onUndo: () => void;
   onRedo: () => void;
 }) {
-  const railButtonClass =
-    "grid h-9 w-9 place-items-center rounded-[12px] text-white/[0.52] transition hover:bg-white/[0.08] hover:text-white/[0.92] disabled:pointer-events-none disabled:text-white/[0.18]";
+  const controlButtonClass =
+    "grid h-9 w-9 place-items-center rounded-[12px] text-white/[0.56] transition hover:bg-white/[0.10] hover:text-white/[0.94] disabled:pointer-events-none disabled:text-white/[0.20]";
 
   return (
-    <div className="absolute inset-y-0 left-0 z-40 flex w-12 flex-col items-center border-r border-white/[0.08] bg-white/[0.055] py-3 shadow-[0_24px_70px_rgba(0,0,0,0.42)] backdrop-blur-2xl">
-      <div className="flex flex-col items-center gap-3">
-        <button
-          aria-label="Open projects"
-          title="Open projects"
-          className="grid h-8 w-8 place-items-center transition hover:brightness-125"
-          onClick={onOpenProjects}
-        >
-          <span className="postliminal-mark scale-[0.82]" aria-hidden="true" />
-        </button>
-
-        <div className="h-px w-7 bg-white/[0.10]" />
-
-        <div className="flex flex-col items-center gap-1">
-          <div
-            aria-label={`Zoom ${Math.round(zoom * 100)}%`}
-            title="Zoom"
-            className="mb-1 grid h-8 w-9 place-items-center font-mono text-[11px] font-semibold leading-none tabular-nums text-white/[0.62]"
-          >
-            {Math.round(zoom * 100)}%
-          </div>
-          <button
-            aria-label="Undo"
-            title="Undo"
-            className={railButtonClass}
-            disabled={!canUndo}
-            onClick={onUndo}
-          >
-            <Undo2 className="h-4 w-4" />
-          </button>
-          <button
-            aria-label="Redo"
-            title="Redo"
-            className={railButtonClass}
-            disabled={!canRedo}
-            onClick={onRedo}
-          >
-            <Redo2 className="h-4 w-4" />
-          </button>
-          <div className="my-1 h-px w-7 bg-white/[0.10]" />
-          <button
-            aria-label="Settings"
-            title="Settings"
-            className={railButtonClass}
-            onClick={onOpenSettings}
-          >
-            <Settings className="h-4 w-4" />
-          </button>
-        </div>
+    <div
+      className={`absolute right-4 top-4 z-30 flex h-10 items-center gap-1 rounded-[14px] p-1 ${FLOATING_GLASS_CLASS}`}
+    >
+      <button
+        aria-label="Undo"
+        title="Undo"
+        className={controlButtonClass}
+        disabled={!canUndo}
+        onClick={onUndo}
+      >
+        <Undo2 className="h-4 w-4" />
+      </button>
+      <button
+        aria-label="Redo"
+        title="Redo"
+        className={controlButtonClass}
+        disabled={!canRedo}
+        onClick={onRedo}
+      >
+        <Redo2 className="h-4 w-4" />
+      </button>
+      <div
+        aria-label={`Zoom ${Math.round(zoom * 100)}%`}
+        title="Zoom"
+        className="grid h-9 min-w-[58px] place-items-center rounded-[12px] px-2 font-mono text-[11px] font-semibold leading-none tabular-nums text-white/[0.66]"
+      >
+        {Math.round(zoom * 100)}%
       </div>
+      <div className="mx-0.5 h-6 w-px bg-white/[0.10]" />
+      <button
+        aria-label="Settings"
+        title="Settings"
+        className={controlButtonClass}
+        onClick={onOpenSettings}
+      >
+        <Settings className="h-4 w-4" />
+      </button>
     </div>
   );
 }
@@ -351,9 +448,11 @@ function SettingsPanel({
 
 function ProjectHeader({
   title,
+  onOpenProjects,
   onRename,
 }: {
   title: string;
+  onOpenProjects: () => void;
   onRename: (title: string) => void;
 }) {
   const [editing, setEditing] = useState(false);
@@ -385,38 +484,52 @@ function ProjectHeader({
 
   return (
     <div
-      className="absolute left-16 top-4 z-30 flex h-10 max-w-[360px] items-center overflow-hidden rounded-[14px] border border-white/[0.12] bg-[#1b1c21]/[0.88] px-3 shadow-[0_18px_48px_rgba(0,0,0,0.42),inset_0_1px_0_rgba(255,255,255,0.10)] backdrop-blur-2xl"
+      className={`absolute left-4 top-4 z-30 flex h-10 max-w-[min(calc(100vw-2rem),420px)] items-center gap-2 overflow-hidden rounded-[14px] px-1.5 ${FLOATING_GLASS_CLASS}`}
       aria-label="Current project"
-      onDoubleClick={() => setEditing(true)}
     >
-      {editing ? (
-        <input
-          ref={inputRef}
-          className="nodrag nopan h-7 min-w-0 bg-transparent text-sm font-medium text-white/[0.94] outline-none"
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          onBlur={save}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              save();
-            }
-            if (event.key === "Escape") {
-              event.preventDefault();
-              cancel();
-            }
-          }}
-        />
-      ) : (
-        <button
-          type="button"
-          className="min-w-0 truncate text-left text-sm font-medium text-white/[0.92] outline-none transition hover:text-white"
-          title="Rename project"
-          onClick={() => setEditing(true)}
-        >
-          {title}
-        </button>
-      )}
+      <button
+        type="button"
+        aria-label="Open projects"
+        title="Open projects"
+        className="grid h-7 w-7 shrink-0 place-items-center rounded-[10px] outline-none transition hover:bg-white/[0.10]"
+        onClick={onOpenProjects}
+      >
+        <span className="postliminal-mark scale-[0.78]" aria-hidden="true" />
+      </button>
+
+      <div
+        className="flex h-7 min-w-0 max-w-[360px] items-center overflow-hidden pr-3"
+        onDoubleClick={() => setEditing(true)}
+      >
+        {editing ? (
+          <input
+            ref={inputRef}
+            className="nodrag nopan h-7 min-w-0 bg-transparent text-sm font-medium text-white/[0.94] outline-none"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onBlur={save}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                save();
+              }
+              if (event.key === "Escape") {
+                event.preventDefault();
+                cancel();
+              }
+            }}
+          />
+        ) : (
+          <button
+            type="button"
+            className="min-w-0 truncate text-left text-sm font-medium text-white/[0.92] outline-none transition hover:text-white"
+            title="Rename project"
+            onClick={() => setEditing(true)}
+          >
+            {title}
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -517,11 +630,15 @@ function looseConnectionEdgeType(
     return "input_to";
   }
 
-  return "references";
+  return createdType === "image_generation" ? "variation_of" : "references";
 }
 
 function nodeWidth(type: NodeType) {
-  return type === "image_generation" ? 362 : 286;
+  if (type === "background_removal" || type === "image_generation") {
+    return IMAGE_MODEL_WIDTH;
+  }
+
+  return 286;
 }
 
 type NodeBounds = {
@@ -532,8 +649,8 @@ type NodeBounds = {
 };
 
 function fallbackNodeSize(type?: string) {
-  if (type === "image_generation") {
-    return { width: 362, height: IMAGE_MODEL_HEIGHT };
+  if (type === "image_generation" || type === "background_removal") {
+    return { width: IMAGE_MODEL_WIDTH, height: IMAGE_MODEL_HEIGHT };
   }
 
   if (type === "prompt") {
@@ -587,6 +704,10 @@ function boundsContainPoint(bounds: NodeBounds, point: { x: number; y: number })
     point.y >= bounds.y &&
     point.y <= bounds.y + bounds.height
   );
+}
+
+function sameStringArray(a: string[], b: string[]) {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
 function nodeAtPoint(
@@ -647,30 +768,23 @@ function looseConnectionNodeData(type: NodeType): NodeData {
     };
   }
 
+  if (type === "background_removal") {
+    return {
+      title: "Remove Background",
+      status: "idle",
+    };
+  }
+
   if (type === "prompt") {
     return {
       title: "Prompt",
-      text: "Describe the next image direction.",
+      text: "",
+      placeholder: "Describe the next image direction.",
       status: "ready",
     };
   }
 
   return {};
-}
-
-function TopRightTaskWidget() {
-  return (
-    <div className="absolute right-4 top-4 z-30 w-36 rounded-[16px] border border-white/[0.10] bg-white/[0.065] px-3 py-3 shadow-2xl backdrop-blur-2xl">
-      <div className="flex items-center gap-1.5 whitespace-nowrap text-xs font-medium leading-none text-white/[0.9]">
-        <Asterisk className="h-3.5 w-3.5 text-[#f5b950]" />
-        <span>No tasks</span>
-      </div>
-      <button className="mt-3 flex items-center gap-1.5 text-xs leading-none text-white/[0.56] transition hover:text-white/[0.9]">
-        Tasks
-        <ChevronDown className="h-3 w-3 text-white/[0.38]" />
-      </button>
-    </div>
-  );
 }
 
 const imageModelQualities = ["low", "medium", "high"] as const;
@@ -797,12 +911,16 @@ function SidebarDropdown({
 }
 
 function useImageModelRunner() {
-  const project = useProjectStore((state) => state.project);
   const updateNode = useProjectStore((state) => state.updateNode);
   const createImageOutputs = useProjectStore((state) => state.createImageOutputs);
 
   return useCallback(
-    async (node: PostliminalNode) => {
+    async (nodeId: string) => {
+      const project = useProjectStore.getState().project;
+      const node = project.nodes.find(
+        (item) => item.id === nodeId && item.type === "image_generation",
+      );
+      if (!node) return;
       if (node.data.status === "running") return;
 
       const option = getImageModelOption(DEFAULT_IMAGE_MODEL_ID);
@@ -814,6 +932,7 @@ function useImageModelRunner() {
       const resolution = normalizeOpenAiImageResolution(node.data.resolution);
       const runs = boundedRuns(node.data.runs);
       const inputs = resolveImageGenerationInputs(project, node.id);
+      const runStartedAt = Date.now();
 
       updateNode(
         node.id,
@@ -827,6 +946,7 @@ function useImageModelRunner() {
             runs,
             status: "running",
             lastRunError: "",
+            runStartedAt,
           },
         },
         "human",
@@ -840,6 +960,7 @@ function useImageModelRunner() {
           quality,
           resolution,
           runs,
+          startedAt: runStartedAt,
         });
 
         createImageOutputs(node.id, result.images, "human", {
@@ -850,13 +971,25 @@ function useImageModelRunner() {
           resolution,
           prompt: inputs.prompt,
         });
-        updateNode(node.id, { data: { lastRunError: "" } }, "human");
+        updateNode(
+          node.id,
+          {
+            data: {
+              lastRunError: "",
+              runMessage: "",
+              runStartedAt: undefined,
+            },
+          },
+          "human",
+        );
       } catch (error) {
         updateNode(
           node.id,
           {
             data: {
               status: "error",
+              runMessage: "",
+              runStartedAt: undefined,
               lastRunError:
                 error instanceof Error
                   ? error.message
@@ -867,17 +1000,109 @@ function useImageModelRunner() {
         );
       }
     },
-    [createImageOutputs, project, updateNode],
+    [createImageOutputs, updateNode],
+  );
+}
+
+function useBackgroundRemovalRunner() {
+  const updateNode = useProjectStore((state) => state.updateNode);
+
+  return useCallback(
+    async (nodeId: string) => {
+      const project = useProjectStore.getState().project;
+      const node = project.nodes.find(
+        (item) => item.id === nodeId && item.type === "background_removal",
+      );
+      if (!node) return;
+      if (node.data.status === "running") return;
+
+      const imageUrl =
+        resolveImageGenerationInputs(project, node.id).imageUrls.slice(-1)[0] ??
+        "";
+      if (!imageUrl) {
+        updateNode(
+          node.id,
+          {
+            data: {
+              status: "error",
+              lastRunError: "Connect an image before removing the background.",
+              runStartedAt: undefined,
+            },
+          },
+          "human",
+        );
+        return;
+      }
+
+      const runStartedAt = Date.now();
+      updateNode(
+        node.id,
+        {
+          data: {
+            status: "running",
+            lastRunError: "",
+            runStartedAt,
+          },
+        },
+        "human",
+      );
+
+      try {
+        const result = await removeImageBackground({
+          projectId: project.projectId,
+          nodeId: node.id,
+          imageUrl,
+        });
+
+        updateNode(
+          node.id,
+          {
+            data: {
+              status: "completed",
+              generatedImageCount: 1,
+              generatedImageUrls: [result.image],
+              activeGeneratedImageIndex: 0,
+              generatedImageMetadata: {
+                sourceModel: "Remove background",
+                apiModel: result.model,
+                apiSize: result.size,
+              },
+              lastRunError: "",
+              runStartedAt: undefined,
+            },
+          },
+          "human",
+        );
+      } catch (error) {
+        updateNode(
+          node.id,
+          {
+            data: {
+              status: "error",
+              lastRunError:
+                error instanceof Error ? error.message : "Background removal failed.",
+              runStartedAt: undefined,
+            },
+          },
+          "human",
+        );
+      }
+    },
+    [updateNode],
   );
 }
 
 function ImageModelTaskRow({
   node,
   expanded,
+  queued,
+  nowMs,
   onToggle,
 }: {
   node: PostliminalNode;
   expanded: boolean;
+  queued: boolean;
+  nowMs: number;
   onToggle: () => void;
 }) {
   const updateNode = useProjectStore((state) => state.updateNode);
@@ -891,12 +1116,20 @@ function ImageModelTaskRow({
     runs,
   });
   const isRunning = node.data.status === "running";
+  const isQueued = queued || node.data.status === "queued";
 
   const updateData = (data: NodeData) => {
     updateNode(node.id, { data }, "human");
   };
 
   const errorMessage = stringDataValue(node.data.lastRunError, "");
+  const displayErrorMessage =
+    errorMessage === "Failed to fetch"
+      ? "Generation was interrupted by the local dev server. Run it again."
+      : errorMessage;
+  const progress = isRunning
+    ? imageGenerationProgressPercent(node.data.runStartedAt, nowMs)
+    : 0;
 
   return (
     <div>
@@ -906,10 +1139,14 @@ function ImageModelTaskRow({
       >
         <Cpu className="h-3.5 w-3.5 shrink-0 text-[#6aa6ff]" />
         <span className="min-w-0 flex-1 truncate">
-          {isRunning ? "Image model running" : "Image model"}
+          {isRunning
+            ? "Image model running"
+            : isQueued
+              ? "Image model queued"
+              : "Image model"}
         </span>
         <span className="font-mono text-[11px] text-white/[0.72]">
-          ~{formatUsdCents(estimatedCost)}
+          {isRunning ? `${progress}%` : `~${formatUsdCents(estimatedCost)}`}
         </span>
         {expanded ? (
           <ChevronDown className="h-3.5 w-3.5 text-white/[0.38]" />
@@ -936,9 +1173,14 @@ function ImageModelTaskRow({
             }
           />
 
-          {errorMessage ? (
+          {displayErrorMessage ? (
             <div className="rounded-[12px] border border-[#f5b950]/[18%] bg-[#f5b950]/[7%] px-2.5 py-2 text-[11px] leading-4 text-white/[0.82]">
-              Image generation failed: {errorMessage}
+              Image generation failed: {displayErrorMessage}
+            </div>
+          ) : null}
+          {isQueued ? (
+            <div className="rounded-[12px] border border-white/[0.12] bg-white/[0.05] px-2.5 py-2 text-[11px] leading-4 text-white/[0.68]">
+              Waiting for an open generation slot...
             </div>
           ) : null}
         </div>
@@ -951,8 +1193,16 @@ function ImageModelInspector({ nodes }: { nodes: PostliminalNode[] }) {
   const updateNode = useProjectStore((state) => state.updateNode);
   const runImageModel = useImageModelRunner();
   const [expandedNodeId, setExpandedNodeId] = useState(nodes[0]?.id ?? "");
+  const [queuedNodeIds, setQueuedNodeIds] = useState<Set<string>>(new Set());
+  const [isBatchRunning, setIsBatchRunning] = useState(false);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const isBatchRunningRef = useRef(false);
   const runningCount = nodes.filter((node) => node.data.status === "running").length;
-  const canRun = nodes.some((node) => node.data.status !== "running");
+  const canRun =
+    !isBatchRunning &&
+    nodes.some(
+      (node) => node.data.status !== "running" && node.data.status !== "queued",
+    );
   const footerRuns = boundedRuns(nodes[0]?.data.runs);
   const totalCost = nodes.reduce(
     (sum, node) =>
@@ -965,6 +1215,18 @@ function ImageModelInspector({ nodes }: { nodes: PostliminalNode[] }) {
       }),
     0,
   );
+  const runningProgress =
+    runningCount > 0
+      ? Math.round(
+          nodes
+            .filter((node) => node.data.status === "running")
+            .reduce(
+              (sum, node) =>
+                sum + imageGenerationProgressPercent(node.data.runStartedAt, nowMs),
+              0,
+            ) / runningCount,
+        )
+      : 0;
 
   useEffect(() => {
     if (nodes.length === 0) return;
@@ -973,17 +1235,73 @@ function ImageModelInspector({ nodes }: { nodes: PostliminalNode[] }) {
     }
   }, [expandedNodeId, nodes]);
 
+  useEffect(() => {
+    if (runningCount === 0) return;
+
+    setNowMs(Date.now());
+    const interval = window.setInterval(() => setNowMs(Date.now()), 250);
+
+    return () => window.clearInterval(interval);
+  }, [runningCount]);
+
   const updateAllRuns = (nextRuns: number) => {
+    if (isBatchRunning) return;
     const runs = boundedRuns(nextRuns);
     nodes.forEach((node) => updateNode(node.id, { data: { runs } }, "human"));
   };
 
   const runSelected = async () => {
-    await Promise.allSettled(
-      nodes
-        .filter((node) => node.data.status !== "running")
-        .map((node) => runImageModel(node)),
+    if (isBatchRunningRef.current) return;
+
+    const nodeIds = nodes
+      .filter(
+        (node) => node.data.status !== "running" && node.data.status !== "queued",
+      )
+      .map((node) => node.id);
+    if (nodeIds.length === 0) return;
+
+    isBatchRunningRef.current = true;
+    setIsBatchRunning(true);
+    setQueuedNodeIds(new Set(nodeIds));
+    nodeIds.forEach((nodeId) =>
+      updateNode(
+        nodeId,
+        {
+          data: {
+            status: "queued",
+            lastRunError: "",
+          },
+        },
+        "human",
+      ),
     );
+
+    let nextIndex = 0;
+    const runNext = async () => {
+      while (nextIndex < nodeIds.length) {
+        const nodeId = nodeIds[nextIndex];
+        nextIndex += 1;
+        setQueuedNodeIds((current) => {
+          const nextQueued = new Set(current);
+          nextQueued.delete(nodeId);
+          return nextQueued;
+        });
+        await runImageModel(nodeId);
+      }
+    };
+
+    try {
+      await Promise.allSettled(
+        Array.from(
+          { length: Math.min(IMAGE_GENERATION_BATCH_CONCURRENCY, nodeIds.length) },
+          () => runNext(),
+        ),
+      );
+    } finally {
+      isBatchRunningRef.current = false;
+      setIsBatchRunning(false);
+      setQueuedNodeIds(new Set());
+    }
   };
 
   return (
@@ -992,23 +1310,14 @@ function ImageModelInspector({ nodes }: { nodes: PostliminalNode[] }) {
       onPointerDown={(event) => event.stopPropagation()}
     >
       <div className="flex h-full flex-col">
-        <div className="border-b border-white/[0.08] px-4 py-4">
-          <div className="flex items-center gap-1.5 whitespace-nowrap text-xs font-medium leading-none text-white/[0.9]">
-            <Asterisk className="h-3.5 w-3.5 text-[#f5b950]" />
-            <span>Tasks</span>
-          </div>
-          <button className="mt-3 flex items-center gap-1.5 text-xs leading-none text-white/[0.56] transition hover:text-white/[0.9]">
-            {runningCount > 0 ? `${runningCount} running` : "No running tasks"}
-            <ChevronDown className="h-3 w-3 text-white/[0.38]" />
-          </button>
-        </div>
-
         <div className="min-h-0 flex-1 overflow-y-auto">
           {nodes.map((node) => (
             <ImageModelTaskRow
               key={node.id}
               node={node}
               expanded={expandedNodeId === node.id}
+              queued={queuedNodeIds.has(node.id)}
+              nowMs={nowMs}
               onToggle={() =>
                 setExpandedNodeId((current) =>
                   current === node.id ? "" : node.id,
@@ -1027,7 +1336,7 @@ function ImageModelInspector({ nodes }: { nodes: PostliminalNode[] }) {
             <div className="flex h-8 items-center overflow-hidden rounded-[12px] border border-white/[0.10] bg-white/[0.045]">
               <button
                 className="grid h-8 w-8 place-items-center text-white/[0.52] transition hover:bg-white/[0.08] hover:text-white/[0.9] disabled:text-white/[0.18]"
-                disabled={footerRuns <= 1}
+                disabled={isBatchRunning || footerRuns <= 1}
                 onClick={() => updateAllRuns(footerRuns - 1)}
               >
                 <Minus className="h-3 w-3" />
@@ -1037,6 +1346,7 @@ function ImageModelInspector({ nodes }: { nodes: PostliminalNode[] }) {
               </div>
               <button
                 className="grid h-8 w-8 place-items-center text-white/[0.52] transition hover:bg-white/[0.08] hover:text-white/[0.9]"
+                disabled={isBatchRunning}
                 onClick={() => updateAllRuns(footerRuns + 1)}
               >
                 <Plus className="h-3 w-3" />
@@ -1055,7 +1365,226 @@ function ImageModelInspector({ nodes }: { nodes: PostliminalNode[] }) {
             onClick={runSelected}
           >
             <ArrowRight className="h-3.5 w-3.5" />
-            {runningCount > 0 ? "Running" : "Run selected"}
+            {runningCount > 0
+              ? `Running ${runningProgress}%`
+              : isBatchRunning
+                ? "Running"
+                : "Run selected"}
+          </button>
+        </div>
+      </div>
+    </aside>
+  );
+}
+
+function BackgroundRemovalTaskRow({
+  node,
+  expanded,
+  queued,
+  nowMs,
+  onToggle,
+}: {
+  node: PostliminalNode;
+  expanded: boolean;
+  queued: boolean;
+  nowMs: number;
+  onToggle: () => void;
+}) {
+  const isRunning = node.data.status === "running";
+  const isQueued = queued || node.data.status === "queued";
+  const errorMessage = stringDataValue(node.data.lastRunError, "");
+  const progress = isRunning
+    ? imageGenerationProgressPercent(node.data.runStartedAt, nowMs)
+    : 0;
+
+  return (
+    <div>
+      <button
+        className="flex h-12 w-full items-center gap-2 px-4 text-left text-xs text-white/[0.9] transition hover:bg-white/[0.055]"
+        onClick={onToggle}
+      >
+        <Eraser className="h-3.5 w-3.5 shrink-0 text-[#6aa6ff]" />
+        <span className="min-w-0 flex-1 truncate">
+          {isRunning
+            ? "Remove background running"
+            : isQueued
+              ? "Remove background queued"
+              : "Remove background"}
+        </span>
+        <span className="font-mono text-[11px] text-white/[0.72]">
+          {isRunning ? `${progress}%` : isQueued ? "queued" : ""}
+        </span>
+        {expanded ? (
+          <ChevronDown className="h-3.5 w-3.5 text-white/[0.38]" />
+        ) : (
+          <ChevronRight className="h-3.5 w-3.5 text-white/[0.38]" />
+        )}
+      </button>
+
+      {expanded ? (
+        <div className="space-y-4 px-4 pb-5">
+          <div>
+            <div className="flex items-center gap-1 text-xs text-white/[0.56]">
+              Method <Info className="h-3 w-3" />
+            </div>
+            <div className="mt-2 flex h-9 w-full items-center rounded-[14px] border border-white/[0.09] bg-white/[0.045] px-3 text-xs font-medium text-white/[0.9] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
+              Transparent PNG
+            </div>
+          </div>
+
+          {errorMessage ? (
+            <div className="rounded-[12px] border border-[#f5b950]/[18%] bg-[#f5b950]/[7%] px-2.5 py-2 text-[11px] leading-4 text-white/[0.82]">
+              Background removal failed: {errorMessage}
+            </div>
+          ) : null}
+          {isQueued ? (
+            <div className="rounded-[12px] border border-white/[0.12] bg-white/[0.05] px-2.5 py-2 text-[11px] leading-4 text-white/[0.68]">
+              Waiting for an open background removal slot...
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function BackgroundRemovalInspector({ nodes }: { nodes: PostliminalNode[] }) {
+  const updateNode = useProjectStore((state) => state.updateNode);
+  const runBackgroundRemoval = useBackgroundRemovalRunner();
+  const [expandedNodeId, setExpandedNodeId] = useState(nodes[0]?.id ?? "");
+  const [queuedNodeIds, setQueuedNodeIds] = useState<Set<string>>(new Set());
+  const [isBatchRunning, setIsBatchRunning] = useState(false);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const isBatchRunningRef = useRef(false);
+  const runningCount = nodes.filter((node) => node.data.status === "running").length;
+  const canRun =
+    !isBatchRunning &&
+    nodes.some(
+      (node) => node.data.status !== "running" && node.data.status !== "queued",
+    );
+  const runningProgress =
+    runningCount > 0
+      ? Math.round(
+          nodes
+            .filter((node) => node.data.status === "running")
+            .reduce(
+              (sum, node) =>
+                sum + imageGenerationProgressPercent(node.data.runStartedAt, nowMs),
+              0,
+            ) / runningCount,
+        )
+      : 0;
+
+  useEffect(() => {
+    if (nodes.length === 0) return;
+    if (expandedNodeId && !nodes.some((node) => node.id === expandedNodeId)) {
+      setExpandedNodeId(nodes[0].id);
+    }
+  }, [expandedNodeId, nodes]);
+
+  useEffect(() => {
+    if (runningCount === 0) return;
+
+    setNowMs(Date.now());
+    const interval = window.setInterval(() => setNowMs(Date.now()), 250);
+
+    return () => window.clearInterval(interval);
+  }, [runningCount]);
+
+  const runSelected = async () => {
+    if (isBatchRunningRef.current) return;
+
+    const nodeIds = nodes
+      .filter(
+        (node) => node.data.status !== "running" && node.data.status !== "queued",
+      )
+      .map((node) => node.id);
+    if (nodeIds.length === 0) return;
+
+    isBatchRunningRef.current = true;
+    setIsBatchRunning(true);
+    setQueuedNodeIds(new Set(nodeIds));
+    nodeIds.forEach((nodeId) =>
+      updateNode(
+        nodeId,
+        {
+          data: {
+            status: "queued",
+            lastRunError: "",
+          },
+        },
+        "human",
+      ),
+    );
+
+    let nextIndex = 0;
+    const runNext = async () => {
+      while (nextIndex < nodeIds.length) {
+        const nodeId = nodeIds[nextIndex];
+        nextIndex += 1;
+        setQueuedNodeIds((current) => {
+          const nextQueued = new Set(current);
+          nextQueued.delete(nodeId);
+          return nextQueued;
+        });
+        await runBackgroundRemoval(nodeId);
+      }
+    };
+
+    try {
+      await Promise.allSettled(
+        Array.from(
+          {
+            length: Math.min(BACKGROUND_REMOVAL_BATCH_CONCURRENCY, nodeIds.length),
+          },
+          () => runNext(),
+        ),
+      );
+    } finally {
+      isBatchRunningRef.current = false;
+      setIsBatchRunning(false);
+      setQueuedNodeIds(new Set());
+    }
+  };
+
+  return (
+    <aside
+      className="absolute inset-y-0 right-0 z-50 w-[252px] border-l border-white/[0.10] bg-white/[0.075] shadow-[0_24px_80px_rgba(0,0,0,0.48)] backdrop-blur-2xl"
+      onPointerDown={(event) => event.stopPropagation()}
+    >
+      <div className="flex h-full flex-col">
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          {nodes.map((node) => (
+            <BackgroundRemovalTaskRow
+              key={node.id}
+              node={node}
+              expanded={expandedNodeId === node.id}
+              queued={queuedNodeIds.has(node.id)}
+              nowMs={nowMs}
+              onToggle={() =>
+                setExpandedNodeId((current) =>
+                  current === node.id ? "" : node.id,
+                )
+              }
+            />
+          ))}
+        </div>
+
+        <div className="border-t border-white/[0.10] px-4 py-4">
+          <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-white/[0.34]">
+            Run selected nodes
+          </div>
+          <button
+            className="mt-4 flex h-9 w-full items-center justify-center gap-2 rounded-[12px] border border-white/[0.14] bg-white/[0.10] text-xs font-medium text-white/[0.92] shadow-[inset_0_1px_0_rgba(255,255,255,0.12)] transition hover:bg-white/[0.14] disabled:cursor-default disabled:opacity-55"
+            disabled={!canRun}
+            onClick={runSelected}
+          >
+            <ArrowRight className="h-3.5 w-3.5" />
+            {runningCount > 0
+              ? `Running ${runningProgress}%`
+              : isBatchRunning
+                ? "Running"
+                : "Run selected"}
           </button>
         </div>
       </div>
@@ -1084,9 +1613,15 @@ function NodeInspector({
   const imageModelNodes = nodes.filter(
     (selectedNode) => selectedNode.type === "image_generation",
   );
+  const backgroundRemovalNodes = nodes.filter(
+    (selectedNode) => selectedNode.type === "background_removal",
+  );
 
   if (imageModelNodes.length > 0) {
     return <ImageModelInspector nodes={imageModelNodes} />;
+  }
+  if (backgroundRemovalNodes.length > 0) {
+    return <BackgroundRemovalInspector nodes={backgroundRemovalNodes} />;
   }
   if (!node) return null;
   if (node.type === "prompt") {
@@ -1220,6 +1755,14 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
   const canRedo = useProjectStore((state) => state.canRedo);
   const { getNodes, screenToFlowPosition } = useReactFlow();
   const looseConnectionStartRef = useRef<LooseConnectionStart | null>(null);
+  const connectionSelectionRef = useRef<string[]>([]);
+  const selectionHistoryRef = useRef<{
+    current: string[];
+    previous: string[];
+  }>({
+    current: project.selectedNodeIds,
+    previous: [],
+  });
   const connectionCompletedRef = useRef(false);
   const [zoom, setZoom] = useState(1);
   const [connectionLineColor, setConnectionLineColor] = useState("#6aa6ff");
@@ -1248,6 +1791,16 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
     setSettings(normalized);
     writeLocalSettings(normalized);
   }, []);
+  const rememberSelection = useCallback((nodeIds: string[]) => {
+    const nextNodeIds = [...nodeIds];
+    const current = selectionHistoryRef.current.current;
+    if (sameStringArray(current, nextNodeIds)) return;
+
+    selectionHistoryRef.current = {
+      current: nextNodeIds,
+      previous: current,
+    };
+  }, []);
 
   const selectedNodes = useMemo(
     () =>
@@ -1261,7 +1814,6 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
   const storeNodes = useMemo<Node<NodeData>[]>(() => {
     const nodeById = new Map(project.nodes.map((node) => [node.id, node]));
     const connectedHandles = new Map<string, Set<string>>();
-    const generatedOutputCounts = new Map<string, number>();
     const generatedImageUrls = new Map<string, string[]>();
     const markConnected = (nodeId: string, handleId: string) => {
       const existing = connectedHandles.get(nodeId) ?? new Set<string>();
@@ -1279,10 +1831,6 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
         targetNode?.type === "image_output"
       ) {
         const imageUrl = targetNode.data.imageUrl;
-        generatedOutputCounts.set(
-          edge.source,
-          (generatedOutputCounts.get(edge.source) ?? 0) + 1,
-        );
         if (typeof imageUrl === "string" && imageUrl.length > 0) {
           generatedImageUrls.set(edge.source, [
             ...(generatedImageUrls.get(edge.source) ?? []),
@@ -1314,11 +1862,6 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
         const combinedImageUrls = Array.from(
           new Set([...nodeGeneratedImageUrls, ...outputNodeImageUrls]),
         );
-        const storedGeneratedImageCount =
-          typeof node.data.generatedImageCount === "number"
-            ? node.data.generatedImageCount
-            : 0;
-        const outputNodeCount = generatedOutputCounts.get(node.id) ?? 0;
 
         return {
           id: node.id,
@@ -1327,11 +1870,7 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
           data: {
             ...node.data,
             nodeType: node.type,
-            generatedImageCount: Math.max(
-              storedGeneratedImageCount,
-              outputNodeCount,
-              combinedImageUrls.length,
-            ),
+            generatedImageCount: combinedImageUrls.length,
             generatedImageUrls: combinedImageUrls,
             connectedHandles: Object.fromEntries(
               Array.from(connectedHandles.get(node.id) ?? []).map((handleId) => [
@@ -1570,14 +2109,91 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
       connectionCompletedRef.current = true;
       const source = project.nodes.find((node) => node.id === connection.source);
       const target = project.nodes.find((node) => node.id === connection.target);
-      connectNodes(
-        connection.source,
-        connection.target,
-        inferEdgeType(source, target),
-        "human",
-      );
+      if (!source || !target) return;
+
+      const selectedAtStart =
+        connectionSelectionRef.current.length > 1
+          ? connectionSelectionRef.current
+          : project.selectedNodeIds.length > 1
+            ? project.selectedNodeIds
+            : connectionSelectionRef.current.length > 0
+              ? connectionSelectionRef.current
+              : project.selectedNodeIds;
+      const sourceHandle = connection.sourceHandle;
+      const targetHandle = connection.targetHandle;
+
+      if (
+        sourceHandle &&
+        sourceHandle === looseConnectionStartRef.current?.handleId
+      ) {
+        const selectedSources = selectedAtStart
+          .map((nodeId) => project.nodes.find((node) => node.id === nodeId))
+          .filter(
+            (node): node is PostliminalNode =>
+              node !== undefined && node.type === source.type,
+          );
+        let connectedCount = 0;
+
+        if (selectedSources.length > 1) {
+          selectedSources.forEach((selectedSource) => {
+            const edgeType = inferEdgeType(selectedSource, target);
+            if (edgeSourceHandle(edgeType) !== sourceHandle) return;
+            if (targetHandle && edgeTargetHandle(edgeType) !== targetHandle) return;
+
+            const edge = connectNodes(
+              selectedSource.id,
+              target.id,
+              edgeType,
+              "human",
+            );
+            if (edge) connectedCount += 1;
+          });
+
+          if (connectedCount > 0) return;
+        }
+      }
+
+      if (
+        target &&
+        (target.type === "image_generation" ||
+          target.type === "background_removal") &&
+        (targetHandle === "prompt-in" || targetHandle === "image-in") &&
+        selectedAtStart.includes(target.id)
+      ) {
+        const selectedImageTargets = selectedAtStart
+          .map((nodeId) => project.nodes.find((node) => node.id === nodeId))
+          .filter(
+            (node): node is PostliminalNode =>
+              node !== undefined && node.type === target.type,
+          );
+        let connectedCount = 0;
+
+        if (selectedImageTargets.length > 1) {
+          selectedImageTargets.forEach((selectedTarget) => {
+            const edgeType = inferEdgeType(source, selectedTarget);
+            if (sourceHandle && edgeSourceHandle(edgeType) !== sourceHandle) return;
+            if (edgeTargetHandle(edgeType) !== targetHandle) return;
+
+            const edge = connectNodes(
+              source.id,
+              selectedTarget.id,
+              edgeType,
+              "human",
+            );
+            if (edge) connectedCount += 1;
+          });
+
+          if (connectedCount > 0) return;
+        }
+      }
+
+      const edgeType = inferEdgeType(source, target);
+      if (targetHandle && edgeTargetHandle(edgeType) !== targetHandle) return;
+      if (sourceHandle && edgeSourceHandle(edgeType) !== sourceHandle) return;
+
+      connectNodes(connection.source, connection.target, edgeType, "human");
     },
-    [connectNodes, project.nodes],
+    [connectNodes, project.nodes, project.selectedNodeIds],
   );
 
   const onConnectStart = useCallback<OnConnectStart>(
@@ -1586,6 +2202,7 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
       const handleId = params.handleId;
       const handleType = params.handleType;
       connectionCompletedRef.current = false;
+      connectionSelectionRef.current = [];
 
       if (
         !nodeId ||
@@ -1601,9 +2218,26 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
         handleId,
         handleType,
       };
+      const startNode = project.nodes.find((node) => node.id === nodeId);
+      const previousSelection = selectionHistoryRef.current.previous;
+      const currentSelection =
+        project.selectedNodeIds.length === 1 &&
+        project.selectedNodeIds[0] === nodeId &&
+        previousSelection.length > 1
+          ? previousSelection
+          : project.selectedNodeIds;
+      const selectedNodesOfSameType = currentSelection.filter((selectedId) => {
+        const selectedNode = project.nodes.find((node) => node.id === selectedId);
+        return selectedNode?.type === startNode?.type;
+      });
+      connectionSelectionRef.current = selectedNodesOfSameType.includes(nodeId)
+        ? selectedNodesOfSameType
+        : currentSelection.length > 0
+          ? currentSelection
+          : [nodeId];
       setConnectionLineColor(handleColor(handleId));
     },
-    [],
+    [project.nodes, project.selectedNodeIds],
   );
 
   const onConnectEnd = useCallback<OnConnectEnd>(
@@ -1624,6 +2258,62 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
       const startNode = project.nodes.find((node) => node.id === start.nodeId);
       if (!startNode) return;
 
+      const selectedConnectorNodes = connectionSelectionRef.current
+        .map((nodeId) => project.nodes.find((node) => node.id === nodeId))
+        .filter(
+          (node): node is PostliminalNode =>
+            node !== undefined && node.type === startNode.type,
+        );
+      const connectorNodes = selectedConnectorNodes.some(
+        (node) => node.id === startNode.id,
+      )
+        ? selectedConnectorNodes
+        : [...selectedConnectorNodes, startNode];
+      const connectSourceToConnectorTargets = (
+        sourceNode: PostliminalNode,
+        explicitEdgeType?: EdgeType,
+      ) => {
+        let connectedCount = 0;
+
+        connectorNodes.forEach((targetNode) => {
+          const batchEdgeType =
+            explicitEdgeType ?? inferEdgeType(sourceNode, targetNode);
+          if (edgeTargetHandle(batchEdgeType) !== start.handleId) return;
+
+          const edge = connectNodes(
+            sourceNode.id,
+            targetNode.id,
+            batchEdgeType,
+            "human",
+          );
+          if (edge) connectedCount += 1;
+        });
+
+        return connectedCount;
+      };
+      const connectConnectorSourcesToTarget = (
+        targetNode: PostliminalNode,
+        explicitEdgeType?: EdgeType,
+      ) => {
+        let connectedCount = 0;
+
+        connectorNodes.forEach((sourceNode) => {
+          const batchEdgeType =
+            explicitEdgeType ?? inferEdgeType(sourceNode, targetNode);
+          if (edgeSourceHandle(batchEdgeType) !== start.handleId) return;
+
+          const edge = connectNodes(
+            sourceNode.id,
+            targetNode.id,
+            batchEdgeType,
+            "human",
+          );
+          if (edge) connectedCount += 1;
+        });
+
+        return connectedCount;
+      };
+
       const flowPoint = screenToFlowPosition(point);
       const droppedNode = nodeAtPoint(getNodes(), flowPoint, start.nodeId);
       const droppedStoreNode = droppedNode
@@ -1631,6 +2321,12 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
         : undefined;
 
       if (droppedStoreNode) {
+        const connectedCount =
+          start.handleType === "target"
+            ? connectSourceToConnectorTargets(droppedStoreNode)
+            : connectConnectorSourcesToTarget(droppedStoreNode);
+        if (connectedCount > 0) return;
+
         if (start.handleType === "target") {
           connectNodes(
             droppedStoreNode.id,
@@ -1662,6 +2358,15 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
         ),
         data: looseConnectionNodeData(createdType),
       });
+
+      const connectedCount =
+        start.handleType === "target"
+          ? connectSourceToConnectorTargets(createdNode, edgeType)
+          : connectConnectorSourcesToTarget(createdNode, edgeType);
+      if (connectedCount > 0) {
+        selectNode(createdNode.id, "human");
+        return;
+      }
 
       if (start.handleType === "target") {
         connectNodes(createdNode.id, start.nodeId, edgeType, "human");
@@ -1707,6 +2412,8 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
 
   const onSelectionChange = useCallback(
     ({ nodes, edges }: OnSelectionChangeParams) => {
+      const nodeIds = nodes.map((node) => node.id);
+      rememberSelection(nodeIds);
       setSelectedEdgeIds(edges.map((edge) => edge.id));
 
       if (nodes.length === 0) {
@@ -1714,12 +2421,12 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
         return;
       }
       if (nodes.length === 1) {
-        selectNode(nodes[0].id, "human");
+        selectNode(nodeIds[0], "human");
         return;
       }
-      selectNodes(nodes.map((node) => node.id), "human");
+      selectNodes(nodeIds, "human");
     },
-    [clearSelection, selectNode, selectNodes],
+    [clearSelection, rememberSelection, selectNode, selectNodes],
   );
 
   const openContextMenu = (event: ReactMouseEvent | globalThis.MouseEvent) => {
@@ -1738,16 +2445,21 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
   const createFromMenu = (type: NodeType) => {
     if (!contextMenu) return;
     const modelOption = getImageModelOption(DEFAULT_IMAGE_MODEL_ID);
-    const data: NodeData =
-      type === "image_generation"
-        ? {
-            title: "Image Model",
-            model: modelOption.id,
-            modelLabel: modelOption.nodeLabel,
-            status: "idle",
-          }
-        : type === "image_reference"
-          ? {
+	    const data: NodeData =
+	      type === "image_generation"
+	        ? {
+	            title: "Image Model",
+	            model: modelOption.id,
+	            modelLabel: modelOption.nodeLabel,
+	            status: "idle",
+	          }
+	        : type === "background_removal"
+	          ? {
+	              title: "Remove Background",
+	              status: "idle",
+	            }
+	        : type === "image_reference"
+	          ? {
               title: "image.png",
               kind: "image_file",
               status: "ready",
@@ -1765,8 +2477,7 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
 
   return (
     <section className="postliminal-surface postliminal-canvas-surface relative h-full min-w-0 overflow-hidden">
-      <AppSidebar
-        onOpenProjects={onOpenProjects}
+      <CanvasControls
         onOpenSettings={() => setSettingsOpen(true)}
         zoom={zoom}
         canUndo={canUndo}
@@ -1774,12 +2485,12 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
         onUndo={undo}
         onRedo={redo}
       />
-      <ProjectHeader title={project.title} onRename={renameProject} />
+      <ProjectHeader
+        title={project.title}
+        onOpenProjects={onOpenProjects}
+        onRename={renameProject}
+      />
       <NodeInspector nodes={selectedNodes} />
-      {selectedNodes.length === 0 ||
-      selectedNodes.every((node) => node.type === "prompt") ? (
-        <TopRightTaskWidget />
-      ) : null}
       {settingsOpen ? (
         <SettingsPanel
           settings={settings}
@@ -1840,6 +2551,7 @@ function CanvasSurface({ onOpenProjects }: { onOpenProjects: () => void }) {
           strokeLinecap: "round",
           filter: `drop-shadow(0 0 7px ${connectionLineColor}30)`,
         }}
+        connectionLineComponent={BatchConnectionLine}
         snapToGrid
         snapGrid={CANVAS_SNAP_GRID}
         zoomOnScroll={false}
